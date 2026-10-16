@@ -124,6 +124,8 @@ const { runMigrations } = require('./src/db/migrations');
 const { audioUrl: buildAudioUrl } = require('./src/utils/publicUrl');
 const audioPreprocess = require('./src/transcription/audioPreprocess');
 const hallucinationFilter = require('./src/transcription/hallucinationFilter');
+const segmentAlign = require('./src/transcription/segmentAlign');
+const SEGMENT_ALIGN_CONFIG = segmentAlign.loadConfig();
 const { v4: uuidv4 } = require('uuid');
 const busboy = require('busboy');
 const sqlite3 = require('sqlite3').verbose();
@@ -3897,11 +3899,31 @@ function splitAudioFile(audioFilePath, segments, callback) {
   };
   
   // First, get the audio file duration to fix the last segment's endPos if needed
-  getAudioDuration(audioFilePath, (err, audioDuration) => {
+  getAudioDuration(audioFilePath, async (err, audioDuration) => {
     if (err) {
       logger.warn(`Could not get audio duration: ${err.message}, proceeding with segments as-is`);
     }
-    
+
+    // srcList positions are whole wall-clock seconds and drift past the audio;
+    // snap each speaker change to a real silence in the recording.
+    if (audioDuration && SEGMENT_ALIGN_CONFIG.enabled) {
+      try {
+        const silences = await segmentAlign.detectSilences(audioFilePath, SEGMENT_ALIGN_CONFIG);
+        const aligned = segmentAlign.alignSegments(segments, silences, audioDuration);
+        if (aligned) {
+          aligned.forEach((s) => {
+            if (s.foldedSources) s.sourceDisplay = `${s.sourceDisplay} (+${s.foldedSources.join(', ')})`;
+          });
+          logger.info(`Aligned speaker changes to audio: ${segments.slice(1).map((s) => s.startPos).join(', ')}s -> ` +
+            `${aligned.slice(1).map((s) => s.startPos.toFixed(2)).join(', ')}s` +
+            (aligned.length < segments.length ? ` (${segments.length - aligned.length} too short to separate)` : ''));
+          segments = aligned;
+        }
+      } catch (alignErr) {
+        logger.warn(`Could not align merged-call segments to audio (${alignErr.message}); using TrunkRecorder positions`);
+      }
+    }
+
     segments.forEach((segment, index) => {
       let startTime = segment.startPos || 0;
       let endTime = segment.endPos || 0;
