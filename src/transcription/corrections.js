@@ -10,9 +10,17 @@
  * Matching ignores case, whole words only, and the words of a phrase may be
  * separated by any spacing or a hyphen ("Cypress Wood", "Cypress-Wood"). A
  * replacement starting with a capital is used as written; one in lower case
- * ("en route") is capitalized when the heard text was. The file can be edited by hand or from the
- * admin page (Settings → Transcript Fixes); both processes reload it when it
- * changes, so no restart is needed.
+ * ("en route") is capitalized when the heard text was.
+ *
+ * Two tokens are for unit numbers, which are only misheard in front of a number:
+ *   {n}  a number such as 81, 5-4 or 1-2-3; the same number goes in the
+ *        replacement:          Psalm {n} => Sam {n}
+ *   ^    (at the start) only at the start of the call or of a sentence, where
+ *        a dispatcher hails a unit:    ^Area {n} => Edward {n}
+ *        ("Area 81, go ahead" is fixed; "in the area 436" is not)
+ *
+ * The file can be edited by hand or from the admin page (Settings → Transcript
+ * Fixes); both processes reload it when it changes, so no restart is needed.
  */
 
 const fs = require('fs');
@@ -31,6 +39,8 @@ const DEFAULT_HEADER = [
   '# match hyphens. A longer phrase wins over a shorter rule inside it.',
   '# Edit here or in Settings -> Transcript Fixes; changes apply to new calls',
   '# within a few seconds, without a restart.',
+  '# Unit numbers: {n} stands for a number ("Psalm {n} => Sam {n}"), and a ^ at',
+  '# the start means only at the start of a sentence ("^Area {n} => Edward {n}").',
 ];
 
 const ARROW = /\s*=>\s*/;
@@ -83,6 +93,11 @@ function validateRule(r) {
   if (ARROW.test(heard) || ARROW.test(replacement) || /#/.test(heard) || /#/.test(replacement)) return `"${heard}": "=>" and "#" can't be used in a fix`;
   if (/[\r\n]/.test(heard + replacement + ((r && r.note) || ''))) return `"${heard}": a fix must be on one line`;
   if (heard.toLowerCase() === replacement.toLowerCase()) return `"${heard}" would be replaced with itself`;
+  const nHeard = (heard.match(/\{n\}/gi) || []).length;
+  if (nHeard > 1) return `"${heard}": use {n} only once`;
+  if (/\{n\}/i.test(replacement) && !nHeard) return `"${heard}": the correction uses {n} but the heard words don't`;
+  if (heard.slice(1).includes('^')) return `"${heard}": ^ can only be at the start`;
+  if (!heard.replace(/^\^/, '').replace(/\{n\}/gi, '').trim()) return `"${heard}": needs at least one word besides ^ and {n}`;
   return null;
 }
 
@@ -92,16 +107,31 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  * Build one matcher for all rules, longest first, so a phrase rule wins over a
  * one-word rule inside it and a replacement is never corrected again.
  */
+// A unit number as transcribed: "81", "5-4", "1-2-3", "05"
+const NUMBER_RE = '\\d{1,4}(?:-\\d{1,4}){0,3}';
+
 function compile(rules) {
   const usable = rules
-    .filter((r) => r.heard && r.heard.trim())
-    .map((r) => ({ ...r, words: r.heard.trim().split(/[\s-]+/).filter(Boolean) }))
+    .filter((r) => r.heard && r.heard.trim() && !validateRule(r))
+    .map((r) => {
+      const heard = r.heard.trim();
+      const atStart = heard.startsWith('^');
+      const words = heard.replace(/^\^\s*/, '').split(/[\s-]+/).filter(Boolean);
+      return { ...r, atStart, words };
+    })
     .filter((r) => r.words.length)
     .sort((a, b) => b.heard.length - a.heard.length);
   if (!usable.length) return { regex: null, rules: [] };
-  const parts = usable.map((r) => `(${r.words.map(escapeRe).join('[\\s-]+')})`);
-  // Word edges that also respect apostrophes ("O'Neil") and digits ("1960")
-  const regex = new RegExp(`(?<![\\w'])(?:${parts.join('|')})(?![\\w'])`, 'gi');
+  // One named group per rule (r0, r1, ...) and one for its number (n0, n1, ...)
+  const parts = usable.map((r, i) => {
+    const body = r.words.map((w) => (/^\{n\}$/i.test(w) ? `(?<n${i}>${NUMBER_RE})` : escapeRe(w))).join('[\\s-]+');
+    // ^: start of the text or of a sentence (after . ! ? and spacing)
+    const start = r.atStart ? '(?<=(?:^|[.!?])\\s*)' : '';
+    return `${start}(?<r${i}>${body})`;
+  });
+  // Word edges that also respect apostrophes ("O'Neil") and digits ("1960");
+  // a number can't be cut short ("Psalm 2" inside "Psalm 2-7")
+  const regex = new RegExp(`(?<![\\w'])(?:${parts.join('|')})(?![\\w']|-\\d)`, 'gi');
   return { regex, rules: usable };
 }
 
@@ -123,12 +153,14 @@ function applyCompiled(text, compiled) {
   if (!text || !compiled.regex) return { text, applied: [] };
   const counts = new Map();
   const out = String(text).replace(compiled.regex, (...args) => {
-    const groups = args.slice(1, compiled.rules.length + 1);
-    const idx = groups.findIndex((g) => g !== undefined);
+    const groups = args[args.length - 1] || {};
+    const idx = compiled.rules.findIndex((r, i) => groups[`r${i}`] !== undefined);
     const rule = compiled.rules[idx];
     if (!rule) return args[0];
     counts.set(rule, (counts.get(rule) || 0) + 1);
-    return matchCase(args[0], rule.replacement);
+    const number = groups[`n${idx}`];
+    const replacement = number !== undefined ? rule.replacement.replace(/\{n\}/gi, number) : rule.replacement;
+    return matchCase(args[0], replacement);
   });
   const applied = [...counts].map(([r, count]) => ({ heard: r.heard, replacement: r.replacement, count }));
   return { text: out, applied };

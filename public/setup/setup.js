@@ -1331,7 +1331,9 @@
       const fileHint = el('div', { class: 'hint', style: 'margin-bottom:10px' }, '');
       c.appendChild(fileHint);
       c.appendChild(infoBox('Case doesn\'t matter and only whole words match ("Tombo" won\'t change "Tombolo"). In a phrase, spaces also match hyphens. ' +
-        'Use a phrase when the word alone is too common: <code>Maxi Road</code> → <code>Maxey Road</code>. Saved fixes apply within a few seconds, without a restart; calls already transcribed aren\'t changed.'));
+        'Use a phrase when the word alone is too common: <code>Maxi Road</code> → <code>Maxey Road</code>. ' +
+        'For unit numbers, <code>{n}</code> stands for the number (<code>Psalm {n}</code> → <code>Sam {n}</code>), and a <code>^</code> at the start limits a fix to the start of a sentence, where units are hailed (<code>^Area {n}</code> → <code>Edward {n}</code> fixes "Area 81, go ahead" but not "in the area 436"). ' +
+        'Saved fixes apply within a few seconds, without a restart; calls already transcribed aren\'t changed.'));
 
       let rules = [];
       let counts = null;

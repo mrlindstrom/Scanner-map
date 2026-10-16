@@ -4,6 +4,8 @@
 # match hyphens. A longer phrase wins over a shorter rule inside it.
 # Edit here or in Settings -> Transcript Fixes; changes apply to new calls
 # within a few seconds, without a restart.
+# Unit numbers: {n} stands for a number ("Psalm {n} => Sam {n}"), and a ^ at
+# the start means only at the start of a sentence ("^Area {n} => Edward {n}").
 
 # Starting list: mishearings of local streets found in a week of calls
 # (Oct 2026), with the number of calls each was heard in.
@@ -67,3 +69,49 @@ One more record => one more wrecker    # 41
 Two records => two wreckers    # 60, "I'm going to need two records up here"
 No more workers => no more wreckers    # 54
 No workers needed => no wreckers needed    # 15
+
+# Unit numbers. {n} is the number; ^ means only where a sentence starts, as when
+# a dispatcher hails a unit. Precinct 4 / HCSO letters (Edward, Nora, Sam,
+# Charles, Frank), HPD/DPS/Metro (Adam, Robert), HFD/MCFD apparatus.
+^Area {n} => Edward {n}    # "Area 57 checking"; not "in the area, 436"
+Editor {n} => Edward {n}
+Headward {n} => Edward {n}
+Nor {n} => Nora {n}    # "Nor 80 checking"
+Norah {n} => Nora {n}
+Nore {n} => Nora {n}
+Noir {n} => Nora {n}
+Nara {n} => Nora {n}
+Nour {n} => Nora {n}
+Nority {n} => Nora {n}
+Norify {n} => Nora {n}
+^Norma {n} => Nora {n}
+Psalm {n} => Sam {n}    # "Psalm 27, are you clear?"
+^Charge {n} => Charles {n}    # "Charles 16, checking ... Charge 16 is secured"
+^Cross {n} => Charles {n}
+^Carl {n} => Charles {n}
+Madam {n} => Adam {n}    # HPD "Madam 64, go ahead"
+Atom {n} => Adam {n}    # "2 Atom 402, checking status"
+Robber {n} => Robert {n}    # Metro "one robber 30"
+Rank {n} => Frank {n}    # "make a rank 22 primary"
+Squat {n} => Squad {n}
+Squaw {n} => Squad {n}
+Ambience {n} => Ambulance {n}    # HFD dispatches
+Amblin {n} => Ambulance {n}
+Adulance {n} => Ambulance {n}
+Amulance {n} => Ambulance {n}
+Ambulant {n} => Ambulance {n}
+Ambient {n} => Ambulance {n}
+Balance {n} => Ambulance {n}
+Latter {n} => Ladder {n}
+Bladder {n} => Ladder {n}
+Mech {n} => Medic {n}
+Medi {n} => Medic {n}
+Merrick {n} => Medic {n}
+Tinker {n} => Tanker {n}    # Montgomery County FD
+Taker {n} => Tanker {n}
+Tanger {n} => Tanker {n}
+Looster {n} => Booster {n}
+Boost {n} => Booster {n}
+Eng {n} => Engine {n}
+England {n} => Engine {n}
+Angie {n} => Engine {n}
