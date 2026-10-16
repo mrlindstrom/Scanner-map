@@ -4079,7 +4079,7 @@ async function processMergedCallSegments(
       logger.error(`Error checking keywords for merged call ID ${transcriptionId}: ${error.message}`, { stack: error.stack });
     }
 
-    if (activeVoiceChannels.has(String(talkGroupID))) {
+    if (isTalkGroupLive(talkGroupID)) {
       playAudioForTalkGroup(talkGroupID, transcriptionId);
     }
     
@@ -4283,7 +4283,7 @@ async function handleNewTranscription(
     // Check for keywords and send alert with the message URL
     await alertOnKeywords(id, transcriptionText, talkGroupID, talkGroupName, systemName, source, talkerAlias, messageUrl);
 
-    if (activeVoiceChannels.has(String(talkGroupID))) {
+    if (isTalkGroupLive(talkGroupID)) {
       playAudioForTalkGroup(talkGroupID, id);
     }
 
@@ -5758,30 +5758,40 @@ function getOrCreateChannel(channelName, categoryId, callback) {
     .finally(() => channelLocks.delete(cacheKey));
 }
 
-// Voice channel and audio playback management
+// Voice channel and audio playback management ("Listen Live" events)
 //
-// "Listen Live" creates a voice channel per talk group; while it exists, each new
-// call on that talk group is queued and played into it. Each talk group gets one
-// connection and one player; the player's listeners are attached once, and going
-// Idle plays the next queued call.
-const activeVoiceChannels = new Map();
+// Discord allows a bot one voice connection per server, so each server has at
+// most one live *event*: a named voice channel that plays new calls from one or
+// more talk groups. Clicking Listen Live asks for an event name, or, if an event
+// is already running, offers to add the talk group to it or replace it with a
+// new event. Each event has one connection and one player; the player's
+// listeners are attached once, and going Idle plays the next queued call.
+const liveEvents = new Map(); // guildId -> event
 const VOICE_READY_TIMEOUT_MS = 20000;
 const VOICE_IDLE_CLEANUP_MS = 2 * 60 * 1000;
+const VOICE_MAX_QUEUE_AGE_MS = 5 * 60 * 1000; // skip calls that waited this long; keeps the event live
 const VOICE_TMP_DIR = path.join(os.tmpdir(), 'scanner-map-voice');
 
-function playAudioForTalkGroup(talkGroupID, transcriptionId) {
-  talkGroupID = talkGroupID.toString();
-  const talkGroupData = activeVoiceChannels.get(talkGroupID);
-  if (!talkGroupData || !talkGroupData.player) {
-    logger.warn(`Listen Live: no active player for talk group ${talkGroupID}`);
-    return;
-  }
+function liveEventsForTalkGroup(talkGroupID) {
+  talkGroupID = String(talkGroupID);
+  return [...liveEvents.values()].filter((ev) => ev.talkGroups.has(talkGroupID));
+}
 
-  talkGroupData.queue.push(transcriptionId);
-  if (talkGroupData.player.state.status === AudioPlayerStatus.Idle && !talkGroupData.loading) {
-    processAudioQueue(talkGroupID);
-  } else {
-    logger.info(`Listen Live: queued call ${transcriptionId} for talk group ${talkGroupID} (${talkGroupData.queue.length} waiting)`);
+function isTalkGroupLive(talkGroupID) {
+  return liveEventsForTalkGroup(talkGroupID).length > 0;
+}
+
+function playAudioForTalkGroup(talkGroupID, transcriptionId) {
+  talkGroupID = String(talkGroupID);
+  for (const event of liveEventsForTalkGroup(talkGroupID)) {
+    if (!event.player) continue;
+    event.queue.push({ transcriptionId, talkGroupID, queuedAt: Date.now() });
+    if (event.player.state.status === AudioPlayerStatus.Idle && !event.loading) {
+      processAudioQueue(event);
+    } else {
+      logger.info(`Listen Live: queued call ${transcriptionId} (TG ${talkGroupID}) for event "${event.name}" ` +
+        `(${event.queue.length} waiting)`);
+    }
   }
 }
 
@@ -5833,92 +5843,176 @@ async function fetchCallAudioToTempFile(transcriptionId) {
   return tmpFile;
 }
 
-async function processAudioQueue(talkGroupID) {
-  talkGroupID = talkGroupID.toString();
-  const talkGroupData = activeVoiceChannels.get(talkGroupID);
-  if (!talkGroupData || !talkGroupData.player) return;
-  if (talkGroupData.loading || talkGroupData.player.state.status !== AudioPlayerStatus.Idle) return;
+async function processAudioQueue(event) {
+  if (!event.player || event.loading || event.player.state.status !== AudioPlayerStatus.Idle) return;
 
-  const transcriptionId = talkGroupData.queue.shift();
-  if (transcriptionId === undefined) return;
+  let item = event.queue.shift();
+  let skipped = 0;
+  while (item && Date.now() - item.queuedAt > VOICE_MAX_QUEUE_AGE_MS) {
+    skipped++;
+    item = event.queue.shift();
+  }
+  if (skipped) logger.info(`Listen Live: skipped ${skipped} stale call(s) on event "${event.name}" to catch up`);
+  if (!item) return;
 
-  talkGroupData.loading = true;
+  event.loading = true;
   let tmpFile = null;
   try {
-    tmpFile = await fetchCallAudioToTempFile(transcriptionId);
+    tmpFile = await fetchCallAudioToTempFile(item.transcriptionId);
   } catch (e) {
-    logger.error(`Listen Live: could not load audio for call ${transcriptionId}: ${e.message}`);
+    logger.error(`Listen Live: could not load audio for call ${item.transcriptionId}: ${e.message}`);
   }
-  talkGroupData.loading = false;
+  event.loading = false;
 
-  // The channel may have been torn down while the audio was loading
-  if (activeVoiceChannels.get(talkGroupID) !== talkGroupData) {
+  // The event may have ended while the audio was loading
+  if (liveEvents.get(event.guildId) !== event) {
     if (tmpFile) fs.unlink(tmpFile, () => {});
     return;
   }
   if (!tmpFile) {
-    logger.error(`Listen Live: no audio found for call ${transcriptionId}`);
-    return processAudioQueue(talkGroupID);
+    logger.error(`Listen Live: no audio found for call ${item.transcriptionId}`);
+    return processAudioQueue(event);
   }
 
   const transcoder = new prism.FFmpeg({
     args: ['-analyzeduration', '0', '-loglevel', 'error', '-i', tmpFile,
       '-f', 's16le', '-ar', '48000', '-ac', '2'],
   });
-  transcoder.on('error', (e) => logger.error(`Listen Live: ffmpeg failed for call ${transcriptionId}: ${e.message}`));
+  transcoder.on('error', (e) => logger.error(`Listen Live: ffmpeg failed for call ${item.transcriptionId}: ${e.message}`));
   transcoder.once('close', () => fs.unlink(tmpFile, () => {}));
 
   const resource = createAudioResource(transcoder, {
     inputType: StreamType.Raw,
-    metadata: { transcriptionId },
+    metadata: { transcriptionId: item.transcriptionId },
   });
-  talkGroupData.lastActivity = Date.now();
-  talkGroupData.player.play(resource);
-  logger.info(`Listen Live: playing call ${transcriptionId} on talk group ${talkGroupID}`);
+  event.lastActivity = Date.now();
+  event.player.play(resource);
+  logger.info(`Listen Live: playing call ${item.transcriptionId} (TG ${item.talkGroupID}) on event "${event.name}"`);
 }
 
-async function handleListenLive(interaction, talkGroupID) {
-  talkGroupID = talkGroupID.toString();
-  await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+function eventTalkGroupList(event) {
+  return [...event.talkGroups.entries()].map(([id, name]) => `• ${name} (${id})`).join('\n');
+}
 
-  const guild = interaction.guild;
+function eventNameModal(talkGroupID, suggestedName, replacing) {
+  const nameInput = new TextInputBuilder()
+    .setCustomId('ll_event_name')
+    .setLabel('Event name (becomes the voice channel name)')
+    .setPlaceholder('e.g. "Structure fire on Main St"')
+    .setStyle(TextInputStyle.Short)
+    .setMaxLength(90)
+    .setRequired(true);
+  if (suggestedName) nameInput.setValue(suggestedName.slice(0, 90));
+  return new ModalBuilder()
+    .setCustomId(`ll_event_modal_${talkGroupID}`)
+    .setTitle(replacing ? `New event (ends "${replacing}")`.slice(0, 45) : 'Start a Listen Live event')
+    .addComponents(new ActionRowBuilder().addComponents(nameInput));
+}
+
+// Button: 🎧 Listen Live on a talk group's message
+async function handleListenLive(interaction, talkGroupID) {
+  talkGroupID = String(talkGroupID);
+  const event = liveEvents.get(interaction.guild.id);
   const talkGroupInfo = await getTalkGroupName(talkGroupID);
 
-  // Discord allows a bot one voice connection per server: joining a second
-  // channel moves the existing connection. So only one talk group can be live
-  // per server; starting another closes the previous one.
-  let switchedFrom = null;
-  for (const [otherID, other] of activeVoiceChannels) {
-    if (otherID !== talkGroupID && other.voiceChannel && other.voiceChannel.guild.id === guild.id) {
-      switchedFrom = other.voiceChannel.name;
-      logger.info(`Listen Live: switching from talk group ${otherID} to ${talkGroupID} (one voice channel per server)`);
-      cleanupVoiceChannel(otherID);
-    }
-  }
-
-  const voiceChannel = await getOrCreateVoiceChannel(guild, talkGroupID, talkGroupInfo.name);
-  if (!voiceChannel) {
-    await interaction.editReply('❌ Failed to create or find voice channel.');
+  if (!event) {
+    await interaction.showModal(eventNameModal(talkGroupID, talkGroupInfo.name));
     return;
   }
 
-  const connection = startStreamingAudio(talkGroupID);
+  if (event.talkGroups.has(talkGroupID)) {
+    await interaction.reply({
+      content: `🎧 **${talkGroupInfo.name}** is already playing in event **${event.name}**: ${event.voiceChannel}`,
+      flags: [MessageFlags.Ephemeral],
+    });
+    return;
+  }
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`ll_add_${talkGroupID}`)
+      .setLabel(`Add to "${event.name}"`.slice(0, 80))
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`ll_new_${talkGroupID}`)
+      .setLabel('Start a new event')
+      .setStyle(ButtonStyle.Danger),
+  );
+  await interaction.reply({
+    content: `🎧 Event **${event.name}** is live in ${event.voiceChannel} with:\n${eventTalkGroupList(event)}\n\n` +
+      `Add **${talkGroupInfo.name}** to it, or start a new event? ` +
+      '(Discord allows only one voice channel per server, so a new event ends the current one.)',
+    components: [row],
+    flags: [MessageFlags.Ephemeral],
+  });
+}
+
+// Button: "Add to <event>"
+async function handleListenLiveAdd(interaction, talkGroupID) {
+  talkGroupID = String(talkGroupID);
+  const event = liveEvents.get(interaction.guild.id);
+  const talkGroupInfo = await getTalkGroupName(talkGroupID);
+  if (!event) {
+    // The event ended since the prompt was shown
+    await interaction.showModal(eventNameModal(talkGroupID, talkGroupInfo.name));
+    return;
+  }
+  event.talkGroups.set(talkGroupID, talkGroupInfo.name);
+  logger.info(`Listen Live: added TG ${talkGroupID} to event "${event.name}"`);
+  await interaction.update({
+    content: `✅ Added **${talkGroupInfo.name}** to event **${event.name}**: ${event.voiceChannel}\n` +
+      `Now playing:\n${eventTalkGroupList(event)}`,
+    components: [],
+  });
+}
+
+// Button: "Start a new event"
+async function handleListenLiveNew(interaction, talkGroupID) {
+  const event = liveEvents.get(interaction.guild.id);
+  const talkGroupInfo = await getTalkGroupName(talkGroupID);
+  // The current event only ends once the new name is submitted, so cancelling the form changes nothing
+  await interaction.showModal(eventNameModal(String(talkGroupID), talkGroupInfo.name, event && event.name));
+}
+
+// Modal submit: event name entered
+async function handleListenLiveEventModal(interaction, talkGroupID) {
+  talkGroupID = String(talkGroupID);
+  await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+  const guild = interaction.guild;
+  const name = interaction.fields.getTextInputValue('ll_event_name').replace(/\s+/g, ' ').trim().slice(0, 90)
+    || 'Listen Live';
+  const talkGroupInfo = await getTalkGroupName(talkGroupID);
+
+  const previous = liveEvents.get(guild.id);
+  if (previous) {
+    logger.info(`Listen Live: event "${previous.name}" replaced by "${name}"`);
+    endLiveEvent(guild.id);
+  }
+
+  const event = await createLiveEvent(guild, name);
+  if (!event) {
+    await interaction.editReply('❌ Failed to create the voice channel.');
+    return;
+  }
+  event.talkGroups.set(talkGroupID, talkGroupInfo.name);
+
   try {
-    await entersState(connection, VoiceConnectionStatus.Ready, VOICE_READY_TIMEOUT_MS);
+    await entersState(event.connection, VoiceConnectionStatus.Ready, VOICE_READY_TIMEOUT_MS);
   } catch (e) {
-    logger.error(`Listen Live: voice connection for talk group ${talkGroupID} never became ready ` +
-      `(state: ${connection ? connection.state.status : 'none'})`);
-    cleanupVoiceChannel(talkGroupID);
+    logger.error(`Listen Live: voice connection for event "${name}" never became ready ` +
+      `(state: ${event.connection.state.status})`);
+    endLiveEvent(guild.id);
     await interaction.editReply('❌ The bot could not connect to voice. Check that it has Connect and Speak ' +
       'permissions, then try again.');
     return;
   }
 
-  monitorVoiceChannel(talkGroupID);
+  monitorLiveEvent(event);
+  logger.info(`Listen Live: event "${name}" started with TG ${talkGroupID}`);
   await interaction.editReply(
-    `🎧 Please join the voice channel: ${voiceChannel}\nTalk Group: ${talkGroupInfo.name}\n` +
-    'New calls on this talk group will play there as they come in.' +
-    (switchedFrom ? `\nℹ️ Stopped ${switchedFrom}: Discord lets the bot be in only one voice channel per server.` : '')
+    `🎧 Event **${name}** is live. Join ${event.voiceChannel}\nPlaying: ${talkGroupInfo.name}\n` +
+    'New calls play there as they come in. Click 🎧 Listen Live on another talk group to add it.' +
+    (previous ? `\nℹ️ Ended event **${previous.name}**.` : '')
   );
 }
 
@@ -5942,14 +6036,11 @@ function getTalkGroupName(talkGroupID) {
   });
 }
 
-async function getOrCreateVoiceChannel(guild, talkGroupID, talkGroupName) {
-  talkGroupID = talkGroupID.toString();
-  if (activeVoiceChannels.has(talkGroupID)) {
-    return activeVoiceChannels.get(talkGroupID).voiceChannel;
-  }
+async function createLiveEvent(guild, name) {
+  let voiceChannel;
   try {
-    const voiceChannel = await guild.channels.create({
-      name: `🔊 ${talkGroupName}`,
+    voiceChannel = await guild.channels.create({
+      name: `🔊 ${name}`,
       type: ChannelType.GuildVoice,
       permissionOverwrites: [
         {
@@ -5958,66 +6049,51 @@ async function getOrCreateVoiceChannel(guild, talkGroupID, talkGroupName) {
         },
       ],
     });
-    activeVoiceChannels.set(talkGroupID, {
-      voiceChannel,
-      connection: null,
-      player: null,
-      lastActivity: Date.now(),
-      queue: [],
-      loading: false,
-      monitor: null,
-    });
-    return voiceChannel;
   } catch (err) {
     logger.error('Error creating voice channel:', err);
     return null;
   }
-}
 
-// Join (or rejoin) the talk group's voice channel; returns the connection.
-function startStreamingAudio(talkGroupID) {
-  talkGroupID = talkGroupID.toString();
-  const talkGroupData = activeVoiceChannels.get(talkGroupID);
-  if (!talkGroupData) {
-    logger.error('No active voice channel data for talk group:', talkGroupID);
-    return null;
-  }
-  if (talkGroupData.connection &&
-      talkGroupData.connection.state.status !== VoiceConnectionStatus.Destroyed) {
-    return talkGroupData.connection;
-  }
+  const event = {
+    guildId: guild.id,
+    name,
+    voiceChannel,
+    talkGroups: new Map(), // talkGroupID -> display name
+    connection: null,
+    player: null,
+    queue: [],
+    loading: false,
+    monitor: null,
+    lastActivity: Date.now(),
+  };
 
-  const { voiceChannel } = talkGroupData;
+  const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } });
+  player.on('stateChange', (oldState, newState) => {
+    if (newState.status === AudioPlayerStatus.Idle && oldState.status !== AudioPlayerStatus.Idle) {
+      processAudioQueue(event);
+    }
+  });
+  player.on('error', (error) => {
+    // The player goes Idle after an error, which moves on to the next call
+    const id = error.resource && error.resource.metadata ? error.resource.metadata.transcriptionId : '?';
+    logger.error(`Listen Live: player error on event "${event.name}" (call ${id}): ${error.message}`);
+  });
+  event.player = player;
+
   const connection = joinVoiceChannel({
     channelId: voiceChannel.id,
-    guildId: voiceChannel.guild.id,
-    adapterCreator: voiceChannel.guild.voiceAdapterCreator,
+    guildId: guild.id,
+    adapterCreator: guild.voiceAdapterCreator,
     selfDeaf: true, // the bot only sends audio
   });
-
-  if (!talkGroupData.player) {
-    const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } });
-    player.on('stateChange', (oldState, newState) => {
-      if (newState.status === AudioPlayerStatus.Idle && oldState.status !== AudioPlayerStatus.Idle) {
-        processAudioQueue(talkGroupID);
-      }
-    });
-    player.on('error', (error) => {
-      // The player goes Idle after an error, which moves on to the next call
-      const id = error.resource && error.resource.metadata ? error.resource.metadata.transcriptionId : '?';
-      logger.error(`Listen Live: player error on talk group ${talkGroupID} (call ${id}): ${error.message}`);
-    });
-    talkGroupData.player = player;
-  }
-  connection.subscribe(talkGroupData.player);
-
+  connection.subscribe(player);
   connection.on('stateChange', (oldState, newState) => {
     if (oldState.status !== newState.status) {
-      logger.debug(`Listen Live: voice connection ${talkGroupID} ${oldState.status} -> ${newState.status}`);
+      logger.debug(`Listen Live: voice connection "${event.name}" ${oldState.status} -> ${newState.status}`);
     }
   });
   connection.on('error', (error) => {
-    logger.error(`Listen Live: voice connection error on talk group ${talkGroupID}: ${error.message}`);
+    logger.error(`Listen Live: voice connection error on event "${event.name}": ${error.message}`);
   });
   connection.on(VoiceConnectionStatus.Disconnected, async () => {
     try {
@@ -6027,63 +6103,54 @@ function startStreamingAudio(talkGroupID) {
         entersState(connection, VoiceConnectionStatus.Connecting, 5000),
       ]);
     } catch (error) {
-      logger.warn(`Listen Live: voice connection for talk group ${talkGroupID} dropped; closing channel`);
-      cleanupVoiceChannel(talkGroupID);
+      if (liveEvents.get(event.guildId) === event) {
+        logger.warn(`Listen Live: voice connection for event "${event.name}" dropped; ending event`);
+        endLiveEvent(event.guildId);
+      }
     }
   });
+  event.connection = connection;
 
-  talkGroupData.connection = connection;
-  return connection;
+  liveEvents.set(guild.id, event);
+  return event;
 }
 
-function monitorVoiceChannel(talkGroupID) {
-  const talkGroupData = activeVoiceChannels.get(talkGroupID);
-  if (!talkGroupData || talkGroupData.monitor) return;
-
-  talkGroupData.monitor = setInterval(() => {
-    const current = activeVoiceChannels.get(talkGroupID);
-    if (current !== talkGroupData) {
-      clearInterval(talkGroupData.monitor);
+function monitorLiveEvent(event) {
+  if (event.monitor) return;
+  event.monitor = setInterval(() => {
+    if (liveEvents.get(event.guildId) !== event) {
+      clearInterval(event.monitor);
       return;
     }
-    const listeners = talkGroupData.voiceChannel.members.filter((member) => !member.user.bot);
+    const listeners = event.voiceChannel.members.filter((member) => !member.user.bot);
     if (listeners.size > 0) {
-      talkGroupData.lastActivity = Date.now();
-    } else if (Date.now() - talkGroupData.lastActivity >= VOICE_IDLE_CLEANUP_MS) {
-      logger.info(`Listen Live: nobody listening on talk group ${talkGroupID}; closing channel`);
-      cleanupVoiceChannel(talkGroupID);
+      event.lastActivity = Date.now();
+    } else if (Date.now() - event.lastActivity >= VOICE_IDLE_CLEANUP_MS) {
+      logger.info(`Listen Live: nobody listening to event "${event.name}"; ending it`);
+      endLiveEvent(event.guildId);
     }
   }, 30 * 1000);
 }
 
-function cleanupVoiceChannel(talkGroupID) {
-  talkGroupID = talkGroupID.toString();
-  const talkGroupData = activeVoiceChannels.get(talkGroupID);
-  if (!talkGroupData) return;
-  activeVoiceChannels.delete(talkGroupID);
+function endLiveEvent(guildId) {
+  const event = liveEvents.get(guildId);
+  if (!event) return;
+  liveEvents.delete(guildId);
 
-  const { voiceChannel, connection, player, monitor } = talkGroupData;
-  if (monitor) clearInterval(monitor);
-  talkGroupData.queue.length = 0;
-
-  if (player) {
-    try { player.stop(true); } catch (error) {
-      logger.error(`Error stopping player for talk group ${talkGroupID}:`, error.message);
+  if (event.monitor) clearInterval(event.monitor);
+  event.queue.length = 0;
+  try { event.player.stop(true); } catch (error) {
+    logger.error(`Error stopping player for event "${event.name}":`, error.message);
+  }
+  if (event.connection && event.connection.state.status !== VoiceConnectionStatus.Destroyed) {
+    try { event.connection.destroy(); } catch (error) {
+      logger.error(`Error destroying connection for event "${event.name}":`, error.message);
     }
   }
-  // Never tear down a connection another talk group is still using
-  const shared = [...activeVoiceChannels.values()].some((other) => other.connection === connection);
-  if (connection && !shared && connection.state.status !== VoiceConnectionStatus.Destroyed) {
-    try { connection.destroy(); } catch (error) {
-      logger.error(`Error destroying connection for talk group ${talkGroupID}:`, error.message);
-    }
-  }
-  if (voiceChannel) {
-    voiceChannel
-      .delete()
-      .then(() => logger.info(`Deleted voice channel for talk group ${talkGroupID}`))
-      .catch((err) => logger.error('Error deleting voice channel:', err));
-  }
+  event.voiceChannel
+    .delete()
+    .then(() => logger.info(`Deleted voice channel for event "${event.name}"`))
+    .catch((err) => logger.error('Error deleting voice channel:', err));
 }
 
 // Define the slash commands
@@ -6371,9 +6438,13 @@ client.on('interactionCreate', async (interaction) => {
 
     try {
       if (customId.startsWith('listen_live_')) {
-        const talkGroupID = customId.replace('listen_live_', '');
-        // Assuming handleListenLive already uses flags correctly based on user comment
-        await handleListenLive(interaction, talkGroupID);
+        await handleListenLive(interaction, customId.replace('listen_live_', ''));
+
+      } else if (customId.startsWith('ll_add_')) {
+        await handleListenLiveAdd(interaction, customId.replace('ll_add_', ''));
+
+      } else if (customId.startsWith('ll_new_')) {
+        await handleListenLiveNew(interaction, customId.replace('ll_new_', ''));
 
       } else if (customId === 'refresh_summary') {
         // Use flags instead of ephemeral: true
@@ -6425,7 +6496,18 @@ client.on('interactionCreate', async (interaction) => {
   } else if (interaction.isModalSubmit()) {
     const customId = interaction.customId;
 
-    if (customId.startsWith('ask_ai_modal_')) {
+    if (customId.startsWith('ll_event_modal_')) {
+      try {
+        await handleListenLiveEventModal(interaction, customId.replace('ll_event_modal_', ''));
+      } catch (error) {
+        logger.error(`Listen Live: error starting event: ${error.message}`, { stack: error.stack });
+        const msg = '❌ There was an error starting the Listen Live event.';
+        try {
+          if (interaction.deferred || interaction.replied) await interaction.editReply(msg);
+          else await interaction.reply({ content: msg, flags: [MessageFlags.Ephemeral] });
+        } catch (_) { /* interaction expired */ }
+      }
+    } else if (customId.startsWith('ask_ai_modal_')) {
       // Make the reply PUBLIC by removing ephemeral flag/option
       await interaction.deferReply(); // No ephemeral flag needed here
       const talkGroupID = customId.replace('ask_ai_modal_', '');
