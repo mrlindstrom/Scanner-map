@@ -8,8 +8,9 @@
  *   Kirkendall => Kuykendahl      # optional note
  *
  * Matching ignores case, whole words only, and the words of a phrase may be
- * separated by any spacing or a hyphen ("Cypress Wood", "Cypress-Wood"). The
- * replacement is used as written. The file can be edited by hand or from the
+ * separated by any spacing or a hyphen ("Cypress Wood", "Cypress-Wood"). A
+ * replacement starting with a capital is used as written; one in lower case
+ * ("en route") is capitalized when the heard text was. The file can be edited by hand or from the
  * admin page (Settings → Transcript Fixes); both processes reload it when it
  * changes, so no restart is needed.
  */
@@ -104,6 +105,19 @@ function compile(rules) {
   return { regex, rules: usable };
 }
 
+/**
+ * A replacement written in lower case ("en route") takes a capital when the
+ * heard text started with one ("In route" -> "En route"); one written with a
+ * capital (a street name) is always used as written.
+ */
+function matchCase(heard, replacement) {
+  if (!replacement) return replacement;
+  const first = replacement.charAt(0);
+  if (first !== first.toLowerCase()) return replacement;
+  const h = heard.charAt(0);
+  return h !== h.toLowerCase() ? first.toUpperCase() + replacement.slice(1) : replacement;
+}
+
 /** Apply compiled rules. Returns { text, applied: [{ heard, replacement, count }] }. */
 function applyCompiled(text, compiled) {
   if (!text || !compiled.regex) return { text, applied: [] };
@@ -114,7 +128,7 @@ function applyCompiled(text, compiled) {
     const rule = compiled.rules[idx];
     if (!rule) return args[0];
     counts.set(rule, (counts.get(rule) || 0) + 1);
-    return rule.replacement;
+    return matchCase(args[0], rule.replacement);
   });
   const applied = [...counts].map(([r, count]) => ({ heard: r.heard, replacement: r.replacement, count }));
   return { text: out, applied };

@@ -41,3 +41,29 @@ West Hamer => Westheimer    # 32, "West Hamer at Central Market"
 West Hammer => Westheimer    # 9
 Bissonnay => Bissonnet    # 18
 Maxi Road => Maxey Road    # 21
+
+# Radio phrases. Lower-case replacements take a capital at the start of a sentence.
+That's Claire => that's clear    # 89, "That's Claire, so I'm in route to TMP"
+I'm Clark => I'm clear    # 127, "I'm Clark, back from patrol"
+I'm Claire => I'm clear    # 8
+Show me a route => show me en route    # 113, "Show me a route to the station"
+Show me in route => show me en route    # 40
+Show me on route => show me en route
+Show me your route => show me en route    # 17
+Show me around to => show me en route to    # 27, "Show me around to Station 8"
+In route => en route    # 873, "have a wrecker in route"
+Alfa => Alpha    # 76
+Auto Bravo => Alpha Bravo    # 34, response code after a dispatch
+Medix => Medic    # 26, "Medix 24"
+
+# Wrecker (tow truck) requests and rotation calls come out as "records"/"workers":
+# "Tension records, tension records, no records needed, 290 in Cypress Rose Hill"
+Attention records => attention wreckers    # 95
+Tension records => attention wreckers    # 15
+No more records => no more wreckers    # 838
+Records needed => wreckers needed    # 266, "no records needed", "two records needed"
+Need a record => need a wrecker    # 237, "Need a record, 6262 Elm Street"
+One more record => one more wrecker    # 41
+Two records => two wreckers    # 60, "I'm going to need two records up here"
+No more workers => no more wreckers    # 54
+No workers needed => no wreckers needed    # 15
