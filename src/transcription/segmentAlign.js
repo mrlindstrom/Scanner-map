@@ -3,11 +3,17 @@
 /**
  * Line up merged-call speaker changes with the actual recording.
  *
- * TrunkRecorder's per-source `pos` values are whole seconds of wall-clock time
- * since the call started. The recording leaves out the dead air between
- * transmissions, so the further into a call, the later `pos` runs ahead of the
- * audio (often past its end). Each transmission does start with a short
- * silence, though, so every speaker change is snapped to a real silence:
+ * Two kinds of per-source `pos` values arrive:
+ *
+ *   - Audio positions (Trunk Recorder, and TrunkRecorder Pro since the release
+ *     that put srcList positions "in the audio"): fractional seconds into the
+ *     saved file. They are already close, so each change is only nudged to a
+ *     silence within NUDGE_WINDOW of it, and kept where it is otherwise.
+ *   - Wall-clock positions (older TrunkRecorder Pro): whole seconds since the
+ *     call was granted, counting the dead air the recording leaves out, so the
+ *     further into a call, the later `pos` runs ahead of the audio (often past
+ *     its end). Each transmission does start with a short silence, though, so
+ *     every speaker change is snapped to a real silence:
  *
  *   - silences are found with ffmpeg's silencedetect;
  *   - boundaries are assigned to silences in order (dynamic programming),
@@ -102,6 +108,33 @@ function alignBoundaries(positions, silences, duration) {
   return best.picks;
 }
 
+/** True when positions look like times in the audio rather than wall-clock seconds. */
+function isAudioRelative(positions, duration) {
+  if (positions.length === 0) return false;
+  const fractional = positions.some((p) => Math.abs(p - Math.round(p)) > 1e-6);
+  return fractional && Math.max(...positions) <= duration + 0.25;
+}
+
+const NUDGE_WINDOW = 0.5; // seconds an audio position may move to reach a silence
+
+/** Audio positions: move each change to the nearest silence close by, or keep it. */
+function nudgeBoundaries(positions, silences, duration) {
+  const cuts = silences
+    .filter((s) => s.start > 0.05 && s.end < duration - 0.05)
+    .map((s) => Math.max(s.start, s.end - 0.1));
+  let prev = 0;
+  return positions.map((pos) => {
+    let best = null;
+    for (const c of cuts) {
+      if (c <= prev || Math.abs(c - pos) > NUDGE_WINDOW) continue;
+      if (best === null || Math.abs(c - pos) < Math.abs(best - pos)) best = c;
+    }
+    const cut = Math.min(Math.max(best ?? pos, prev), duration);
+    prev = cut;
+    return cut;
+  });
+}
+
 /**
  * Adjust merged-call segments ({startPos, endPos, ...}) to the recording.
  * Returns new segment objects; changes that couldn't be placed are folded into
@@ -110,7 +143,10 @@ function alignBoundaries(positions, silences, duration) {
 function alignSegments(segments, silences, duration) {
   if (!segments || segments.length < 2 || !Number.isFinite(duration) || duration <= 0) return null;
   const positions = segments.slice(1).map((s) => s.startPos || 0);
-  const picks = alignBoundaries(positions, silences, duration);
+  const audioRelative = isAudioRelative(positions, duration);
+  const picks = audioRelative
+    ? nudgeBoundaries(positions, silences, duration)
+    : alignBoundaries(positions, silences, duration);
 
   const out = [{ ...segments[0], startPos: 0, alignedFrom: segments[0].startPos }];
   picks.forEach((cut, i) => {
@@ -125,7 +161,8 @@ function alignSegments(segments, silences, duration) {
   for (let i = 0; i < out.length; i++) {
     out[i].endPos = i + 1 < out.length ? out[i + 1].startPos : duration;
   }
+  out.audioRelative = audioRelative;
   return out;
 }
 
-module.exports = { loadConfig, detectSilences, alignBoundaries, alignSegments };
+module.exports = { loadConfig, detectSilences, alignBoundaries, nudgeBoundaries, isAudioRelative, alignSegments };
