@@ -124,7 +124,7 @@ Measured on a day of real calls before the change: only 53% of extracted address
 - Every extraction and geocoding step is now in the log files (the console still shows only the results), so misses can be reviewed.
 
 ### 📻 Dispatch summary
-- **Finds the calls that matter.** The old summary took the longest transcript from each quarter of the hour, so a rambling traffic stop beat a 5-second "shots fired". Now every call is scored from the signals Scanner Map already has: dispatch tones, keyword matches, the map category, a located address, and high-priority radio phrases. Routine chatter ("10-4", "en route", "show me clear", radio checks) scores low.
+- **Finds the calls that matter.** The old summary took the longest transcript from each quarter of the hour, so a rambling traffic stop beat a 5-second "shots fired". Now every call is scored from the signals Scanner Map already has: dispatch tones, keyword matches, the map category (or, for calls with no address, the call type the dispatcher named, such as "chest pain" or "disturbance"), a located address, and high-priority radio phrases. Routine chatter ("10-4", "en route", "show me clear", radio checks) scores low.
 - **The AI triages incidents.** The top candidates go to the AI with a clear severity rubric. It groups related calls into one incident (same address, same units, a dispatch and its follow-ups) and returns only critical, high and medium incidents; routine ones are left out instead of used as padding.
 - **The embed** lists incidents most severe first (🔴 / 🟠 / 🟡), each with the latest status, time, talk group, audio, a link to its Discord message and map, and how many related calls it covers.
 - If the AI is down, the summary shows the highest-scoring calls instead of an error.
