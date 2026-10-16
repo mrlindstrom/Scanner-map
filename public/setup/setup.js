@@ -1286,6 +1286,9 @@
       actions.appendChild(checkBtn); actions.appendChild(runBtn);
       c.appendChild(actions);
 
+      const source = el('div', { class: 'hint', style: 'margin-top:6px' }, '');
+      c.appendChild(source);
+
       const out = el('pre', { class: 'log-view', style: 'display:none;max-height:300px' });
       c.appendChild(out);
 
@@ -1295,6 +1298,7 @@
         const d = r.data || {};
         if (!d.ok) { info.className = 'result err'; info.textContent = '✗ ' + (d.error || 'Check failed'); return; }
         if (!d.gitRepo) { info.className = 'result'; info.textContent = d.message || 'Not a git checkout.'; runBtn.disabled = true; return; }
+        source.textContent = d.source ? `Updates from: ${d.source.url} (branch ${d.source.branch})` : '';
         if (d.upToDate) { info.className = 'result ok'; info.textContent = `✓ Up to date (v${d.version}, ${d.local}).`; runBtn.disabled = true; changelog.style.display = 'none'; }
         else { info.className = 'result ok'; info.textContent = `⬆ ${d.behind} update(s) available (current ${d.local} → ${d.remote}).`; runBtn.disabled = false;
           if (d.changelog && d.changelog.length) { changelog.style.display = 'block'; changelog.textContent = 'Incoming changes:\n' + d.changelog.join('\n'); } }

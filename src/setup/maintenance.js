@@ -111,6 +111,7 @@ function updateCheck() {
       return { ok: true, gitRepo: true, behind: 0, message: 'No upstream branch configured.' };
     }
     const remote = remoteRef.stdout.trim();
+    const source = updateSource();
     const countRes = spawnSync('git', ['rev-list', '--count', 'HEAD..@{u}'], { cwd: REPO_ROOT, encoding: 'utf8' });
     const behind = parseInt((countRes.stdout || '0').trim(), 10) || 0;
     const logRes = spawnSync('git', ['log', '--oneline', '-10', 'HEAD..@{u}'], { cwd: REPO_ROOT, encoding: 'utf8' });
@@ -123,10 +124,27 @@ function updateCheck() {
       remote: remote ? remote.slice(0, 8) : null,
       changelog: (logRes.stdout || '').split(/\r?\n/).filter(Boolean),
       version: appVersion(),
+      source,
     };
   } catch (e) {
     return { ok: false, error: e.message };
   }
+}
+
+/** Where updates come from: the current branch's upstream, e.g. github.com/user/repo (2.0). */
+function updateSource() {
+  const git = (args) => {
+    const r = spawnSync('git', args, { cwd: REPO_ROOT, encoding: 'utf8' });
+    return r.status === 0 ? (r.stdout || '').trim() : '';
+  };
+  const upstream = git(['rev-parse', '--abbrev-ref', '@{u}']); // e.g. origin/2.0
+  const slash = upstream.indexOf('/');
+  if (slash < 0) return null;
+  const remoteName = upstream.slice(0, slash);
+  const url = git(['remote', 'get-url', remoteName])
+    .replace(/\/\/[^@/]+@/, '//') // never show credentials embedded in the URL
+    .replace(/\.git$/, '');
+  return { remote: remoteName, branch: upstream.slice(slash + 1), url };
 }
 
 let updateJob = null; // { running, log:[], code }
