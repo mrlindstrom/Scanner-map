@@ -4359,13 +4359,15 @@ function loadSummary() {
 
       // --- NEW TICKER CONTENT HANDLING ---
       // Create content with main summary and highlights
-      let baseContent = `${data.summary} | `;
+      // Summary text comes from transcripts and the AI; never insert it as HTML
+      const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+      let baseContent = `${esc(data.summary)} | `;
 
       // Add highlights if available
       if (data.highlights && data.highlights.length > 0) {
         data.highlights.forEach(highlight => {
           // IMPORTANT: Use the class "summary-highlight" here
-          baseContent += `<span class="summary-highlight">${highlight.talk_group}</span>: ${highlight.description} (${highlight.time}) | `;
+          baseContent += `<span class="summary-highlight">${esc(highlight.talk_group)}</span>: ${esc(highlight.description)} (${esc(highlight.time)}) | `;
         });
       }
 

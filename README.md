@@ -113,6 +113,13 @@ Settings: `STORAGE_SAVE_*`, `STORAGE_FALLBACK_*`, `STORAGE_OUTAGE_COOLDOWN_SEC`.
 - **Listen Live events.** Clicking 🎧 Listen Live asks for an event name, and that becomes the voice channel's name. If an event is already running, you can **add the talk group to it**, so one channel plays calls from several talk groups, or **start a new event**, which ends the current one. Discord allows a bot only one voice channel per server, so there is one event at a time. Calls that waited more than 5 minutes in the queue are skipped so the event stays live. The bot ends the event about 2 minutes after the last listener leaves.
 - Keyword alerts now also fire for merged calls.
 
+### 📻 Dispatch summary
+- **Finds the calls that matter.** The old summary took the longest transcript from each quarter of the hour, so a rambling traffic stop beat a 5-second "shots fired". Now every call is scored from the signals Scanner Map already has: dispatch tones, keyword matches, the map category, a located address, and high-priority radio phrases. Routine chatter ("10-4", "en route", "show me clear", radio checks) scores low.
+- **The AI triages incidents.** The top candidates go to the AI with a clear severity rubric. It groups related calls into one incident (same address, same units, a dispatch and its follow-ups) and returns only critical, high and medium incidents; routine ones are left out instead of used as padding.
+- **The embed** lists incidents most severe first (🔴 / 🟠 / 🟡), each with the latest status, time, talk group, audio, a link to its Discord message and map, and how many related calls it covers.
+- If the AI is down, the summary shows the highest-scoring calls instead of an error.
+- Uses the same Ollama model and context size as the rest of Scanner Map, so it doesn't make Ollama reload the model. `SUMMARY_MAX_INCIDENTS`, `SUMMARY_MAX_CANDIDATES`, `SUMMARY_MIN_SCORE`, `SUMMARY_EXTRA_PRIORITY_TERMS`, `SUMMARY_EXTRA_BENIGN_TERMS`
+
 ### 📜 Logs
 - **Daily rotation**: a new log file each day, keeping `LOG_RETENTION_DAYS` days (default 3). `LOG_MAX_SIZE` sets an optional per-file size cap.
 - **Readable console**: one aligned layout (time, level, source, message). Each call gets a header with talkgroup and call ID, followed by its transcript. Repeated errors are collapsed into a summary line. `LOG_CONSOLE_VERBOSE=true` shows everything; `NO_COLOR=1` turns off colours.

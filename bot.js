@@ -123,6 +123,8 @@ const pendingUploads = require('./src/storage/pendingUploads');
 const { runMigrations } = require('./src/db/migrations');
 const { audioUrl: buildAudioUrl, getPublicBaseUrl } = require('./src/utils/publicUrl');
 const callEmbeds = require('./src/discord/callEmbeds');
+const summaryTriage = require('./src/summary/triage');
+const summaryIncidents = require('./src/summary/incidents');
 const audioPreprocess = require('./src/transcription/audioPreprocess');
 const hallucinationFilter = require('./src/transcription/hallucinationFilter');
 const segmentAlign = require('./src/transcription/segmentAlign');
@@ -4440,6 +4442,7 @@ function sendAlertMessage(entry, talkGroupName, systemName, messageUrl) {
 // filled in by editing it.
 
 const callMessageStates = new Map(); // transcription ID -> message state, for later edits
+const callMessageUrls = new Map(); // transcription ID -> { url, at }, linked from the dispatch summary
 const CATEGORY_REFRESH_DELAYS_MS = [8000, 20000, 45000]; // the web server categorizes mapped calls a few seconds after geocoding
 
 function sourceDisplayName(source, talkerAlias) {
@@ -4557,6 +4560,7 @@ async function postCallMessage(entry, talkGroupID, talkGroupName, systemName) {
         cached.timestamp = now;
         syncStateCacheFields(cached);
         callMessageStates.set(String(entry.id), cached);
+        callMessageUrls.set(String(entry.id), { url: edited.url, at: now });
         logger.info(`Updated message with transcription ID ${entry.id}, URL: ${edited.url}`);
         return edited.url;
       } catch (err) {
@@ -4583,6 +4587,7 @@ async function postCallMessage(entry, talkGroupID, talkGroupName, systemName) {
     syncStateCacheFields(state);
     messageCache.set(channel.id, state);
     callMessageStates.set(String(entry.id), state);
+    callMessageUrls.set(String(entry.id), { url: msg.url, at: now });
     logger.info(`Created new message with transcription ID ${entry.id}, URL: ${msg.url}`);
     return msg.url;
   } catch (err) {
@@ -4633,8 +4638,13 @@ function cleanupMessageCache() {
   for (const [id, state] of callMessageStates.entries()) {
     if (currentTime - state.timestamp > 5 * 60 * 1000) callMessageStates.delete(id);
   }
+  // Kept for the summary's lookback window
+  const summaryKeepMs = LOOKBACK_PERIOD + 30 * 60 * 1000;
   for (const [id, tone] of callTones.entries()) {
-    if (currentTime - tone.at > 30 * 60 * 1000) callTones.delete(id);
+    if (currentTime - tone.at > summaryKeepMs) callTones.delete(id);
+  }
+  for (const [id, link] of callMessageUrls.entries()) {
+    if (currentTime - link.at > summaryKeepMs) callMessageUrls.delete(id);
   }
 }
 
@@ -4692,7 +4702,7 @@ function getRecentTranscriptions() {
     }
 
     db.all(
-      `SELECT t.id, t.talk_group_id, t.timestamp, t.transcription, t.address, t.lat, t.lon,
+      `SELECT t.id, t.talk_group_id, t.timestamp, t.transcription, t.address, t.lat, t.lon, t.category,
               COALESCE(
                 (SELECT alpha_tag FROM talk_groups tg WHERE tg.id = t.talk_group_id AND tg.system = COALESCE(t.system,'') LIMIT 1),
                 (SELECT alpha_tag FROM talk_groups tg WHERE tg.id = t.talk_group_id AND tg.system = '' LIMIT 1),
@@ -4854,338 +4864,140 @@ function getMessageUrlForTranscription(transcriptionId, suppressWarnings = false
 }
 
 // Function to send data to Ollama and get summary
-async function generateSummary(transcriptions) {
-  try {
-    if (transcriptions.length === 0) {
-      return { 
-        summary: `No notable transmissions in the past ${LOOKBACK_HOURS} ${LOOKBACK_HOURS === 1 ? 'hour' : 'hours'}.`, 
-        highlights: [] 
-      };
-    }
-    
-    // Prepare the transcriptions in a format useful for the AI
-    const formattedTranscriptions = transcriptions
-      .map(t => {
-        // Format timestamp for human readability - Multiply by 1000
-        const callDate = new Date(t.timestamp * 1000);
-        const formattedTime = callDate.toLocaleTimeString('en-US', {
-          hour: 'numeric',
-          minute: '2-digit',
-          hour12: true,
-          timeZone: TIMEZONE
-        });
-        
-        // Add minutes ago for easier time reference - Multiply by 1000
-        const minutesAgo = Math.floor((Date.now() - (t.timestamp * 1000)) / (60 * 1000));
-        
-        // Extract more meaningful information
-        return {
-          id: t.id,
-          talk_group_id: t.talk_group_id,
-          talk_group: t.talk_group_name || `TG ${t.talk_group_id}`,
-          county: t.county || 'Unknown',
-          timestamp: t.timestamp,
-          formatted_time: formattedTime,
-          minutes_ago: minutesAgo,
-          transcription: t.transcription,
-          location: t.address ? `${t.address} (${t.lat}, ${t.lon})` : 'Unknown'
-        };
-      });
-    
-    // Group transmissions by time periods to ensure distribution
-    const now = new Date();
-    const periodCount = 4; // Divide the hour into 4 quarters
-    const periodLength = LOOKBACK_HOURS * 60 / periodCount; // in minutes
-    
-    const timeBuckets = Array(periodCount).fill().map(() => []);
-    
-    // Sort transcriptions into time buckets
-    formattedTranscriptions.forEach(t => {
-      // Assign minutes_ago to the object if it wasn't already done (it is done earlier)
-      const minutesAgo = t.minutes_ago;
-      
-      const bucketIndex = Math.min(periodCount - 1, Math.floor(minutesAgo / periodLength));
+// Dispatch summary in two passes: score every call cheaply (src/summary/triage.js),
+// then have the LLM group and rate the top candidates as incidents
+// (src/summary/incidents.js). Routine traffic never reaches the summary.
+const SUMMARY_MAX_INCIDENTS = Math.max(1, parseInt(process.env.SUMMARY_MAX_INCIDENTS, 10) || 6);
+const SUMMARY_MAX_CANDIDATES = Math.max(5, parseInt(process.env.SUMMARY_MAX_CANDIDATES, 10) || 40);
+const SUMMARY_MIN_SCORE = Number.isFinite(parseFloat(process.env.SUMMARY_MIN_SCORE)) ? parseFloat(process.env.SUMMARY_MIN_SCORE) : 2.5;
+const SUMMARY_AI_TIMEOUT_MS = (parseFloat(process.env.SUMMARY_AI_TIMEOUT_SEC) || 180) * 1000;
+const SUMMARY_EXTRA_PRIORITY = summaryTriage.compileExtra(process.env.SUMMARY_EXTRA_PRIORITY_TERMS);
+const SUMMARY_EXTRA_BENIGN = summaryTriage.compileExtra(process.env.SUMMARY_EXTRA_BENIGN_TERMS);
 
-      // --- DEBUG LOGGING ---
-      // Use debug level for potentially verbose logs
-      logger.debug(`[SummaryBucket] TS: ${t.timestamp}, MinutesAgo: ${minutesAgo}, PeriodLength: ${periodLength}, BucketIndex: ${bucketIndex}`);
-      // --- END DEBUG LOGGING ---
-
-      // --- GUARD CONDITION ---
-      if (bucketIndex >= 0 && bucketIndex < periodCount && timeBuckets[bucketIndex]) {
-        timeBuckets[bucketIndex].push(t);
-      } else {
-        logger.warn(`[SummaryBucket] Invalid bucketIndex (${bucketIndex}) or undefined bucket for timestamp ${t.timestamp}. Skipping push.`);
-        // Optionally log the problematic transcription object:
-        // logger.warn(`Problematic transcription object: ${JSON.stringify(t)}`);
-      }
-      // --- END GUARD CONDITION ---
-    });
-    
-    // Get time range for the analyzed data
-    const earliest = new Date(now.getTime() - LOOKBACK_PERIOD);
-    const earliestTime = formattedTranscriptions.length > 0 ? 
-      // Multiply by 1000
-      new Date(Math.min(...formattedTranscriptions.map(t => t.timestamp * 1000))).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: TIMEZONE }) : 
-      new Date(Date.now() - LOOKBACK_PERIOD).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: TIMEZONE });
-    
-    const latestTime = formattedTranscriptions.length > 0 ? 
-      // Multiply by 1000
-      new Date(Math.max(...formattedTranscriptions.map(t => t.timestamp * 1000))).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: TIMEZONE }) : 
-      new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: TIMEZONE });
-    
-    // Generate time period descriptions for the AI
-    const timePeriodsInfo = timeBuckets.map((bucket, index) => {
-      const startMinutes = index * periodLength;
-      const endMinutes = (index + 1) * periodLength;
-      return {
-        period: `Period ${index+1}: ${startMinutes}-${endMinutes} minutes ago`,
-        count: bucket.length,
-        sample_time: bucket.length > 0 ? bucket[0].formatted_time : 'none'
-      };
-    });
-    
-    logger.info(`Generating summary for ${formattedTranscriptions.length} transmissions from ${earliestTime} to ${latestTime}`);
-    logger.info(`Time periods: ${JSON.stringify(timePeriodsInfo)}`);
-    
-    // Pre-select highlights from each time period to ensure distribution
-    const preSelectedHighlights = [];
-    
-    // Try to select one from each time bucket
-    timeBuckets.forEach((bucket, index) => {
-      if (bucket.length > 0) {
-        // Sort bucket by transcription length as a simple heuristic for "interestingness"
-        bucket.sort((a, b) => b.transcription.length - a.transcription.length);
-        
-        // Take the longest transcription from each bucket (if available)
-        const selection = bucket[0];
-        preSelectedHighlights.push(selection);
-        
-        logger.info(`Selected highlight from Period ${index+1}: ID ${selection.id} at ${selection.formatted_time} (${selection.minutes_ago} min ago)`);
-      }
-    });
-    
-    // Limit to 5 highlights max, prioritizing newer ones if we have too many
-    if (preSelectedHighlights.length > 5) {
-      preSelectedHighlights.sort((a, b) => a.minutes_ago - b.minutes_ago);
-      preSelectedHighlights.splice(5);
-    }
-    
-    // Log our pre-selections
-    logger.info(`Pre-selected ${preSelectedHighlights.length} highlights with timestamps: ${preSelectedHighlights.map(h => h.formatted_time).join(', ')}`);
-    
-    // Format for the AI to only analyze these specific transmissions
-    const highlightSelections = preSelectedHighlights.map(h => ({
-      id: h.id,
-      talk_group: h.talk_group,
-      timestamp: h.timestamp,
-      formatted_time: h.formatted_time,
-      minutes_ago: h.minutes_ago,
-      transcription: h.transcription,
-      location: h.location
-    }));
-    
-    // Create the prompt for the AI - focus only on summarizing, not selecting
-    const commonPrompt = `You are an experienced emergency dispatch analyst for a police and fire department. 
-
-First, write a concise summary (2-3 sentences long max) of notable activity in the past ${LOOKBACK_HOURS} ${LOOKBACK_HOURS === 1 ? 'hour' : 'hours'} (from ${earliestTime} to ${latestTime}).
-
-Then, I've selected ${highlightSelections.length} important transmissions from different time periods for you to analyze. For EACH of these transmissions, provide:
-1) A clear, detailed description of what's happening (1 sentence long max)
-2) Do not over generalize the details. Keep things like addresses, street names, license plate numbers/etc.
-3) An importance rating (High/Medium/Low)
-
-The transmissions I've selected span across the hour to give a representative view:
-${JSON.stringify(highlightSelections)}
-
-Return ONLY a JSON object with this format:
-{
-  "summary": "Brief overall summary of notable activity covering the full time period",
-  "highlights": [
-    {
-      "id": transcription_id (use the exact id I provided),
-      "talk_group": "Talk group name (use what I provided)",
-      "importance": "High/Medium/Low based on urgency and public safety impact",
-      "description": "Clear, detailed description of what's happening in this transmission and why it matters",
-      "timestamp": "original timestamp (use what I provided)"
-    }
-  ]
+function summaryTimeLabel(ts) {
+  return new Date(ts * 1000).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: TIMEZONE });
 }
 
-Focus on providing insightful analysis of each transmission. The "description" field should help someone understand exactly what's happening without needing to listen to the audio.
-Include no other text besides this JSON.`;
-
-    // Call the AI provider with a timeout
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000); // 30 second timeout
-    let resultText = '';
-    
-    try {
-      if (AI_PROVIDER.toLowerCase() === 'openai') {
-        if (!OPENAI_API_KEY) {
-            logger.error("[Bot] FATAL: AI_PROVIDER is set to openai, but OPENAI_API_KEY is not configured!");
-            throw new Error("OpenAI API key is not configured.");
-        }
-        logger.info(`[Bot] Generating summary with OpenAI model: ${OPENAI_MODEL}`);
-
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${OPENAI_API_KEY}`
-            },
-            body: JSON.stringify({
-                model: OPENAI_MODEL,
-                messages: [{ role: 'user', content: commonPrompt }],
-                temperature: 0.3,
-                response_format: { type: "json_object" } // Request JSON output
-            }),
-            signal: controller.signal
-        });
-
-        if (!response.ok) {
-            const errorBody = await response.text();
-            throw new Error(`OpenAI API error! status: ${response.status}. Body: ${errorBody}`);
-        }
-        const result = await response.json();
-        if (result.choices && result.choices.length > 0 && result.choices[0].message) {
-            resultText = result.choices[0].message.content;
-        }
-
-      } else { // Default to Ollama
-        logger.info(`[Bot] Generating summary with Ollama model: ${OLLAMA_MODEL}`);
-
-        const response = await fetch(`${OLLAMA_URL}/api/generate`, {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            model: OLLAMA_MODEL,
-            prompt: commonPrompt,
-            stream: false,
-			options: { num_ctx: 8192 }
-          }),
-          signal: controller.signal
-        });
-
-        if (!response.ok) {
-          throw new Error(`Ollama API error! status: ${response.status}`);
-        }
-        
-        const data = await response.json();
-        resultText = data.response;
-      }
-      
-      clearTimeout(timeout);
-      
-      // Extract the JSON part from the response (works for both providers)
-      const jsonMatch = resultText.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        try {
-          const parsedJson = JSON.parse(jsonMatch[0]);
-          
-          // Ensure summary reflects the correct time period
-          if (parsedJson.summary && !parsedJson.summary.includes(`${LOOKBACK_HOURS}`)) {
-            parsedJson.summary = parsedJson.summary.replace(
-              /past hour|last hour|recent hour/, 
-              `past ${LOOKBACK_HOURS} ${LOOKBACK_HOURS === 1 ? 'hour' : 'hours'}`
-            );
-          }
-          
-          // --- ADD THIS: Ensure timestamps in highlights are numbers ---
-          if (parsedJson.highlights && Array.isArray(parsedJson.highlights)) {
-            parsedJson.highlights.forEach(highlight => {
-              if (highlight.timestamp && typeof highlight.timestamp === 'string') {
-                const numericTimestamp = parseFloat(highlight.timestamp);
-                if (!isNaN(numericTimestamp)) {
-                  highlight.timestamp = numericTimestamp;
-                } else {
-                  logger.warn(`[generateSummary] Could not convert timestamp string "${highlight.timestamp}" to number for highlight ID ${highlight.id}. Leaving as is.`);
-                }
-              } else if (typeof highlight.timestamp !== 'number') {
-                // If it's not a string and not a number, log a warning and attempt to parse or set to a default
-                logger.warn(`[generateSummary] Timestamp for highlight ID ${highlight.id} is not a string or number: ${typeof highlight.timestamp}, value: ${highlight.timestamp}. Attempting to parse or default.`);
-                const numericTimestamp = parseFloat(highlight.timestamp); // Attempt to parse whatever it is
-                highlight.timestamp = !isNaN(numericTimestamp) ? numericTimestamp : 0; // Default to 0 if unparseable
-              }
-            });
-          }
-          // --- END ADDED CODE ---
-
-          // Log summary creation success with time details
-          logger.info(`Successfully generated summary with ${parsedJson.highlights?.length || 0} highlights`);
-          
-          // Add a check to verify time distribution
-          if (parsedJson.highlights && parsedJson.highlights.length > 0) {
-            const timestamps = parsedJson.highlights.map(h => new Date(h.timestamp).toLocaleTimeString('en-US', {
-              hour: 'numeric',
-              minute: '2-digit',
-              hour12: true
-            }));
-            logger.info(`Highlight timestamps: ${timestamps.join(', ')}`);
-          }
-          
-          return parsedJson;
-        } catch (e) {
-          logger.error('Error parsing AI provider JSON response:', e);
-          return { 
-            summary: `Error processing summary for the past ${LOOKBACK_HOURS} ${LOOKBACK_HOURS === 1 ? 'hour' : 'hours'}.`, 
-            highlights: [] 
-          };
-        }
-      } else {
-        logger.error('No JSON found in AI provider response');
-        return { 
-          summary: `Unable to generate a structured summary for the past ${LOOKBACK_HOURS} ${LOOKBACK_HOURS === 1 ? 'hour' : 'hours'}.`, 
-          highlights: [] 
-        };
-      }
-    } catch (error) {
-      if (error.name === 'AbortError') {
-        throw new Error('Request to AI provider timed out after 30 seconds');
-      }
-      throw error;
+// One JSON completion from the configured provider. Ollama uses the same model
+// and num_ctx as Scanner Map's other requests, so the loaded model is reused
+// rather than reloaded.
+async function summaryAiCompletion(prompt) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SUMMARY_AI_TIMEOUT_MS);
+  try {
+    if (AI_PROVIDER.toLowerCase() === 'openai') {
+      if (!OPENAI_API_KEY) throw new Error('OpenAI API key is not configured.');
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
+        body: JSON.stringify({
+          model: OPENAI_MODEL,
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.2,
+          response_format: { type: 'json_object' },
+        }),
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`OpenAI API error ${response.status}: ${await response.text()}`);
+      const result = await response.json();
+      return result.choices?.[0]?.message?.content || '';
     }
+    const response = await fetch(`${OLLAMA_URL}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: OLLAMA_MODEL,
+        prompt,
+        stream: false,
+        format: 'json',
+        // num_ctx must match Scanner Map's other Ollama requests or the model reloads.
+        // Ollama serves one request at a time, so cap the reply to keep address extraction from waiting long.
+        options: { num_ctx: 8192, temperature: 0.2, num_predict: 900 },
+      }),
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`Ollama API error ${response.status}`);
+    return (await response.json()).response || '';
   } catch (error) {
-    logger.error(`Error generating summary with AI provider: ${error.message}`);
-    
-    // Create a basic fallback summary
-    const timeframe = `${LOOKBACK_HOURS} ${LOOKBACK_HOURS === 1 ? 'hour' : 'hours'}`;
-    
-    // If we have transcriptions, create a simple highlight of the most recent ones
-    if (transcriptions.length > 0) {
-      // Select highlights across different time periods for fallback
-      const fallbackHighlights = [];
-      
-      // Sort by timestamp
-      const sortedTranscriptions = [...transcriptions].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-      
-      // Try to get one from each quarter of the time period
-      const totalItems = sortedTranscriptions.length;
-      if (totalItems > 0) {
-        for (let i = 0; i < Math.min(5, totalItems); i++) {
-          // Get index that's distributed across the array
-          const index = Math.floor(i * totalItems / 5);
-          fallbackHighlights.push({
-            id: sortedTranscriptions[index].id,
-            talk_group: sortedTranscriptions[index].talk_group_name || `TG ${sortedTranscriptions[index].talk_group_id}`,
-            importance: "Medium",
-            description: sortedTranscriptions[index].transcription.length > 100 ? 
-              sortedTranscriptions[index].transcription.substring(0, 97) + '...' : 
-              sortedTranscriptions[index].transcription,
-            timestamp: sortedTranscriptions[index].timestamp
-          });
-        }
-      }
-      
-      return { 
-        summary: `There were ${transcriptions.length} transmissions in the past ${timeframe}. AI summary unavailable: ${error.message}`, 
-        highlights: fallbackHighlights 
-      };
-    }
-    
-    return { 
-      summary: `Failed to generate summary for the past ${timeframe}: ${error.message}`, 
-      highlights: [] 
+    if (error.name === 'AbortError') throw new Error(`AI request timed out after ${SUMMARY_AI_TIMEOUT_MS / 1000}s`);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function generateSummary(transcriptions) {
+  const timeframe = `${LOOKBACK_HOURS} ${LOOKBACK_HOURS === 1 ? 'hour' : 'hours'}`;
+  const stats = { total: transcriptions.length, candidates: 0 };
+  if (transcriptions.length === 0) {
+    return { summary: `No transmissions in the past ${timeframe}.`, incidents: [], highlights: [], stats, source: 'none' };
+  }
+
+  // Signals for scoring: matched keywords and detected tones
+  const keywordRows = await new Promise((resolve) => {
+    db.all('SELECT keyword, talk_group_id FROM global_keywords', [], (err, rows) => resolve(err ? [] : rows || []));
+  });
+  const calls = transcriptions.map((t) => {
+    const lower = String(t.transcription || '').toLowerCase();
+    const tone = callTones.get(String(t.id));
+    return {
+      ...t,
+      talk_group: t.talk_group_name || `TG ${t.talk_group_id}`,
+      keywords: keywordRows
+        .filter((k) => (k.talk_group_id == null || String(k.talk_group_id) === String(t.talk_group_id))
+          && lower.includes(String(k.keyword).toLowerCase()))
+        .map((k) => k.keyword),
+      tones: tone ? tone.descriptions : [],
+    };
+  });
+
+  const { candidates } = summaryTriage.selectCandidates(calls, {
+    max: SUMMARY_MAX_CANDIDATES,
+    minScore: SUMMARY_MIN_SCORE,
+    extraPriority: SUMMARY_EXTRA_PRIORITY,
+    extraBenign: SUMMARY_EXTRA_BENIGN,
+  });
+  stats.candidates = candidates.length;
+  logger.info(`Summary: ${calls.length} calls, ${candidates.length} candidates after scoring` +
+    (candidates.length ? ` (top: ${candidates.slice(0, 3).map((c) => `${c.id}=${c.score}`).join(', ')})` : ''));
+  if (candidates.length === 0) {
+    return { summary: `Routine traffic only in the past ${timeframe} (${calls.length} transmissions).`, incidents: [], highlights: [], stats, source: 'none' };
+  }
+
+  const times = calls.map((c) => c.timestamp);
+  const prompt = summaryIncidents.buildPrompt(candidates, {
+    lookbackHours: LOOKBACK_HOURS,
+    startLabel: summaryTimeLabel(Math.min(...times)),
+    endLabel: summaryTimeLabel(Math.max(...times)),
+    totalCalls: calls.length,
+    maxIncidents: SUMMARY_MAX_INCIDENTS,
+    timeLabel: summaryTimeLabel,
+    onTrim: (kept, total) => logger.info(`Summary: sending the top ${kept} of ${total} candidates to fit the AI context`),
+  });
+
+  try {
+    const started = Date.now();
+    logger.info(`Summary: asking ${AI_PROVIDER.toLowerCase() === 'openai' ? OPENAI_MODEL : OLLAMA_MODEL} to triage ${candidates.length} candidates`);
+    const reply = await summaryAiCompletion(prompt);
+    const { summary, incidents } = summaryIncidents.parseIncidents(reply, candidates, SUMMARY_MAX_INCIDENTS);
+    logger.info(`Summary: ${incidents.length} incident(s) in ${((Date.now() - started) / 1000).toFixed(1)}s: ` +
+      (incidents.map((i) => `${i.severity} ${i.title}`).join('; ') || 'none'));
+    return {
+      summary: summary || (incidents.length ? `${incidents.length} notable incident(s) in the past ${timeframe}.` : `Routine traffic only in the past ${timeframe}.`),
+      incidents,
+      highlights: summaryIncidents.toHighlights(incidents),
+      stats,
+      source: 'ai',
+    };
+  } catch (error) {
+    logger.error(`Summary: AI triage failed (${error.message}); showing the highest-scoring calls instead`);
+    const incidents = summaryIncidents.fallbackIncidents(candidates, SUMMARY_MAX_INCIDENTS);
+    return {
+      summary: `AI summary unavailable (${error.message}). Showing the highest-priority calls by keyword scoring.`,
+      incidents,
+      highlights: summaryIncidents.toHighlights(incidents),
+      stats,
+      source: 'fallback',
     };
   }
 }
@@ -5300,86 +5112,53 @@ async function updateSummaryEmbed() {
       logger.error(`Error in summary generation: ${summaryError.message}`);
       summary = {
         summary: `Error generating summary: ${summaryError.message}. Please try again later.`,
-        highlights: []
+        incidents: [], highlights: [], stats: { total: transcriptions.length, candidates: 0 }, source: 'error',
       };
     }
-    
+
     // Save the summary to JSON file for the website
     saveSummaryToJson(summary.summary, summary.highlights);
-    
-    // Create the embed with time span info
+
+    const incidents = summary.incidents || [];
+    const counts = summaryIncidents.SEVERITIES
+      .map((sev) => [sev, incidents.filter((i) => i.severity === sev).length])
+      .filter(([, n]) => n > 0)
+      .map(([sev, n]) => `${summaryIncidents.SEVERITY_ICON[sev]} ${n} ${sev.toLowerCase()}`);
+    const statsLine = `${counts.length ? counts.join(' · ') + ' · ' : ''}from ${summary.stats ? summary.stats.total : transcriptions.length} transmissions`;
+    const worst = incidents.length ? incidents[0].severity : 'NONE';
+
     const embed = new EmbedBuilder()
-      .setTitle(`📻 Dispatch Summary - Past ${LOOKBACK_HOURS} ${LOOKBACK_HOURS === 1 ? 'Hour' : 'Hours'} ${timeSpanInfo}`)
-      .setDescription(summary.summary)
+      .setTitle(`📻 Dispatch Summary - Past ${LOOKBACK_HOURS} ${LOOKBACK_HOURS === 1 ? 'Hour' : 'Hours'} ${timeSpanInfo}`.slice(0, 256))
+      .setDescription(`${summary.summary}\n\n${statsLine}`.slice(0, 1500))
       .setTimestamp()
-      .setColor(0x3498db)
-      .setFooter({ text: 'Updates every 10 minutes • Powered by AI' });
-    
-    // Add highlights
-    if (summary.highlights && summary.highlights.length > 0) {
-      for (const highlight of summary.highlights) {
-        // Get audio URL
-        const audioUrl = buildAudioUrl(highlight.id);
-        
-        // Fix timestamp display - use timestamp directly from database
-        let timestampDisplay;
-        // Ensure highlight.timestamp is a number and not NaN
-        if (typeof highlight.timestamp === 'number' && !isNaN(highlight.timestamp)) {
-          try {
-            const originalTimestamp = new Date(highlight.timestamp * 1000); // Multiply by 1000
+      .setColor(summaryIncidents.SEVERITY_COLOR[worst])
+      .setFooter({ text: summary.source === 'fallback'
+        ? 'Updates every 10 minutes • AI unavailable, ranked by keyword scoring'
+        : 'Updates every 10 minutes • Ranked by AI from pre-scored calls' });
 
-            // Format the database timestamp directly
-            timestampDisplay = originalTimestamp.toLocaleTimeString('en-US', {
-              hour: 'numeric',
-              minute: '2-digit',
-              hour12: true,
-              timeZone: TIMEZONE
-            });
-
-            // Explicitly check if toLocaleTimeString returned "Invalid Date"
-            if (timestampDisplay === 'Invalid Date') {
-              logger.warn(`[updateSummaryEmbed] Formatted time is \'Invalid Date\' for highlight ID ${highlight.id} (timestamp value: ${highlight.timestamp}). Original Date obj was: ${originalTimestamp.toISOString()}`);
-              timestampDisplay = 'Time N/A'; // Fallback for "Invalid Date" string
-            }
-          } catch (err) {
-            logger.error(`[updateSummaryEmbed] Error formatting timestamp for highlight ID ${highlight.id} (timestamp value: ${highlight.timestamp}): ${err.message}`);
-            timestampDisplay = 'Time N/A'; // Fallback for other errors during date processing
-          }
-        } else {
-          logger.warn(`[updateSummaryEmbed] highlight.timestamp (\'${highlight.timestamp}\') is invalid or missing for highlight ID ${highlight.id}. Full highlight: ${JSON.stringify(highlight)}`);
-          timestampDisplay = 'Time N/A'; // Fallback if timestamp is not a valid number
-        }
-        
-        // Format the field
-        let fieldValue = `**${highlight.description}**\n`;
-        fieldValue += `*${timestampDisplay} • Importance: ${highlight.importance}*\n`;
-        
-        // Only add the audio link - NO message URL for summary
-        fieldValue += `[🔊 Listen](${audioUrl})`;
-        
-        embed.addFields({
-          name: highlight.talk_group,
-          value: fieldValue,
-          inline: false
-        });
-      }
-    } else {
+    // One field per incident, most severe first. Embeds are capped at 6000 characters overall.
+    let budget = 6000 - 300 - (embed.data.title || '').length - (embed.data.description || '').length;
+    for (const inc of incidents) {
+      const lead = inc.calls[0];
+      const name = `${summaryIncidents.SEVERITY_ICON[inc.severity]} ${inc.title}${inc.location ? ` — ${inc.location}` : ''}`.slice(0, 256);
+      const links = [`<t:${Math.floor(lead.timestamp)}:t>`, lead.talk_group || `TG ${lead.talk_group_id}`, `[▶️ Audio](${buildAudioUrl(lead.id)})`];
+      const messageUrl = callMessageUrls.get(String(lead.id));
+      if (messageUrl) links.push(`[💬 Message](${messageUrl.url})`);
+      if (lead.lat != null && lead.lon != null) links.push(`[🗺️ Map](${scannerMapCallUrl(lead.id)})`);
+      if (inc.calls.length > 1) links.push(`+${inc.calls.length - 1} related call${inc.calls.length === 2 ? '' : 's'}`);
+      const value = `${inc.description}\n${links.join(' · ')}`.slice(0, 1024);
+      if (name.length + value.length > budget) break;
+      budget -= name.length + value.length;
+      embed.addFields({ name, value, inline: false });
+    }
+    if (incidents.length === 0) {
       embed.addFields({
-        name: 'No Highlights',
-        value: 'No significant transmissions detected in the past hour.',
-        inline: false
+        name: '✅ Nothing notable',
+        value: `No incidents rated medium or higher in the past ${LOOKBACK_HOURS === 1 ? 'hour' : `${LOOKBACK_HOURS} hours`}.`,
+        inline: false,
       });
     }
-    
-    // Add status field if there was an error with AI provider
-    if (summary.summary.includes('Error') || summary.summary.includes('unavailable')) {
-      embed.addFields({
-        name: '⚠️ AI Service Status',
-        value: 'The AI summary service is currently experiencing issues. Please check the server logs for more information.',
-        inline: false
-      });
-    }
-    
+
     // Create refresh button
     const refreshButton = new ButtonBuilder()
       .setCustomId('refresh_summary')
