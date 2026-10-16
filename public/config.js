@@ -13,9 +13,16 @@ const config = {
     maxZoom: 18, // Changing this may break tracking new calls!
     minZoom: 6,
     attribution: '&copy; OpenStreetMap contributors &copy; Scanner Map V2.0',
-    timeZone: 'America/New_York', // Time zone for display
+    timeZone: 'America/Chicago', // Time zone for display
   },
    
+  // Appearance
+  ui: {
+    // Theme for visitors who haven't picked one in Settings > Theme:
+    // 'original' | 'amber' | 'win95' | 'midnight' | 'daylight'
+    defaultTheme: 'original',
+  },
+
   // Time settings
   time: {
     defaultTimeRangeHours: 12, // Default time range in hours
@@ -72,19 +79,34 @@ const config = {
     // Rules to determine which icon to use for each marker, looks at talkgroup names.
     // Format: { type: [string match patterns] }
     police: [
-      'TXDPS Tyler 1',
-      'MCPD',
-      'Police',
-      'PGSO 1 Disp',
-      'Gregg SO Disp 2',
-      'TXDPS',
-	  'PGPD'
+      'HCSO Disp 1',
+	  'HCSO TAC 1',
+	  'HCSO TAC 2',
+	  'HCSO TAC 3',
+	  'HCSO TAC 4',
+	  'HCSO TAC 5',
+	  'HCSO TAC 6',
+      'HCCO4 Disp 1',
+      'HCCO4 Disp 2',
+	  'HCCO4 Disp 3',
+      'HCCO4 East',
+      'HCCO4 West',
+	  'Tomball PD 1',
+	  'Tomball PD 2',
+      'Klein ISD PD',
+	  'TXDPS Hou 1'
     ],
     fire: [
-      'MCFR',
-      'Fire',
-	  'RefuseCol',
-	  'PGFD'
+      'Tomball FD',
+      'Tomball FD Tac',
+	  'MCFD 1',
+	  'MCFD 2',
+	  'MCFD 3',
+	  'MCFD 4',
+	  'Fire Response',
+	  'Klein FD',
+	  'Spring FD',
+	  'North Comm Dispatch'
     ],
     // Audio path based classifications, use this if talkgroup name dont contain pd/fd etc will check audio file name.
     audioPaths: {

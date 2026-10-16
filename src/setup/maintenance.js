@@ -71,7 +71,8 @@ function listLogs() {
       .map((f) => {
         const st = fs.statSync(path.join(LOG_DIR, f));
         return { name: f, sizeKB: Math.round(st.size / 1024), modified: st.mtime };
-      });
+      })
+      .sort((a, b) => b.modified - a.modified); // newest (today's rotated log) first
   } catch {
     return [];
   }
@@ -79,7 +80,9 @@ function listLogs() {
 
 /** Return the last N lines of a log file (safe, bounded read). */
 function tailLog(name, lines = 200) {
-  const safe = path.basename(name || 'combined.log');
+  // Logs rotate daily (combined-YYYY-MM-DD.log); default to the newest one.
+  const newestCombined = listLogs().find((l) => l.name.startsWith('combined'));
+  const safe = path.basename(name || (newestCombined && newestCombined.name) || 'combined.log');
   const file = path.join(LOG_DIR, safe);
   try {
     if (!fs.existsSync(file)) return { ok: false, error: 'Log not found' };

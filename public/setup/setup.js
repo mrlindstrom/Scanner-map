@@ -30,6 +30,12 @@
   }
 
   let authToken = null; // admin session token (only needed when auth is enabled)
+  // Set when /api/setup/status can't be read (e.g. not signed in as admin); the
+  // page then warns instead of passing defaults off as the real configuration.
+  let configLoadError = null;
+
+  const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (ch) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 
   function authHeaders(base = {}) {
     return authToken ? { ...base, Authorization: `Bearer ${authToken}` } : base;
@@ -1245,13 +1251,13 @@
       const logRow = el('div', { class: 'tg-bulk' });
       logRow.appendChild(logSel); logRow.appendChild(tail);
       c.appendChild(logRow);
-      const pre = el('pre', { class: 'log-view', style: 'max-height:340px;overflow:auto;background:#0a0f0a;color:#9f9;padding:10px;border-radius:6px;font-size:12px;white-space:pre-wrap' }, '');
+      const pre = el('pre', { class: 'log-view', style: 'max-height:340px' }, '');
       c.appendChild(pre);
       adminFetch('/api/setup/logs').then((r) => {
         (((r.data || {}).logs) || []).forEach((l) => logSel.appendChild(el('option', { value: l.name }, `${l.name} (${l.sizeKB} KB)`)));
       });
       const viewLog = async () => {
-        const r = await adminFetch('/api/setup/log-tail?' + new URLSearchParams({ name: logSel.value || 'combined.log', lines: '300' }));
+        const r = await adminFetch('/api/setup/log-tail?' + new URLSearchParams({ name: logSel.value || '', lines: '300' }));
         pre.textContent = (r.data && r.data.lines) ? r.data.lines.join('\n') : ((r.data && r.data.error) || 'No output');
         pre.scrollTop = pre.scrollHeight;
       };
@@ -1271,7 +1277,7 @@
 
       const info = el('div', { class: 'result' }, 'Checking…');
       c.appendChild(info);
-      const changelog = el('pre', { style: 'background:#0a0f0a;color:#9f9;padding:10px;border-radius:6px;font-size:12px;white-space:pre-wrap;display:none' });
+      const changelog = el('pre', { class: 'log-view', style: 'display:none' });
       c.appendChild(changelog);
 
       const actions = el('div', { class: 'tg-bulk' });
@@ -1280,7 +1286,7 @@
       actions.appendChild(checkBtn); actions.appendChild(runBtn);
       c.appendChild(actions);
 
-      const out = el('pre', { style: 'background:#0a0f0a;color:#9f9;padding:10px;border-radius:6px;font-size:12px;white-space:pre-wrap;display:none;max-height:300px;overflow:auto' });
+      const out = el('pre', { class: 'log-view', style: 'display:none;max-height:300px' });
       c.appendChild(out);
 
       const check = async () => {
@@ -1613,11 +1619,18 @@
     c.innerHTML = '';
     const wrap = el('div', { class: 'step' });
     c.appendChild(wrap);
+    if (SETTINGS_MODE && configLoadError) {
+      wrap.appendChild(infoBox(
+        `<b>Couldn't load your current settings</b> (server said: ${escapeHtml(configLoadError)}). ` +
+        'Everything on this page is showing <b>defaults, not your configuration</b>, and saving is turned off. ' +
+        'Sign in as <b>admin</b> on the <a href="/">map</a>, then reload this page.', 'warn'));
+    }
     steps[current].render(wrap);
     buildNav();
     if (SETTINGS_MODE) {
       $('#btn-back').style.visibility = 'hidden';
       $('#btn-next').textContent = 'Save Changes';
+      $('#btn-next').disabled = !!configLoadError;
     } else {
       $('#btn-back').style.visibility = current === 0 ? 'hidden' : 'visible';
       $('#btn-next').textContent = current === steps.length - 1 ? 'Finish Setup' : 'Next';
@@ -1628,13 +1641,21 @@
   async function saveProgress() {
     const payload = {};
     Object.keys(state).forEach((k) => { if (!k.startsWith('__')) payload[k] = state[k]; });
+    if (configLoadError) {
+      // Saving page defaults over the real config would be destructive
+      $('#save-indicator').textContent = 'Save disabled: settings did not load';
+      return false;
+    }
     $('#save-indicator').textContent = 'Saving…';
     try {
-      await api('/api/setup/save', { method: 'POST', body: JSON.stringify(payload) });
+      const r = await adminFetch('/api/setup/save', { method: 'POST', body: JSON.stringify(payload) });
+      if (!r.ok) throw new Error((r.data && r.data.error) || `HTTP ${r.status}`);
       $('#save-indicator').textContent = 'Saved';
       setTimeout(() => ($('#save-indicator').textContent = ''), 1500);
+      return true;
     } catch (e) {
-      $('#save-indicator').textContent = 'Save failed';
+      $('#save-indicator').textContent = `Save failed: ${e.message}`;
+      return false;
     }
   }
 
@@ -1730,8 +1751,12 @@
   }
 
   $('#btn-next').addEventListener('click', async () => {
-    await saveProgress();
-    if (SETTINGS_MODE) { toast('Settings saved. Some changes need a restart.', 'ok'); return; }
+    const saved = await saveProgress();
+    if (SETTINGS_MODE) {
+      if (saved) toast('Settings saved. Some changes need a restart.', 'ok');
+      else toast('Settings were NOT saved: ' + $('#save-indicator').textContent, 'err');
+      return;
+    }
     if (current === steps.length - 1) { finish(); return; }
     current += 1;
     renderStep();
@@ -1746,11 +1771,19 @@
       if (sess && sess.session && sess.session.token) authToken = sess.session.token;
     } catch (_) { /* no session / auth disabled */ }
     try {
-      const status = await api('/api/setup/status');
-      Object.assign(state, status.config || {});
-      Object.entries(status.secretsSet || {}).forEach(([k, v]) => { state['__secretSet_' + k] = v; });
-      state['__launcher'] = !!status.launcher;
-    } catch (_) { /* ignore */ }
+      const r = await adminFetch('/api/setup/status');
+      if (r.ok && r.data) {
+        const status = r.data;
+        Object.assign(state, status.config || {});
+        Object.entries(status.secretsSet || {}).forEach(([k, v]) => { state['__secretSet_' + k] = v; });
+        state['__launcher'] = !!status.launcher;
+      } else if (SETTINGS_MODE) {
+        // Don't fall back to defaults silently: they'd show e.g. auth as "disabled"
+        configLoadError = (r.data && r.data.error) || `HTTP ${r.status}`;
+      }
+    } catch (e) {
+      if (SETTINGS_MODE) configLoadError = e.message || 'network error';
+    }
     // Deep-link support: /settings#sessions jumps straight to that tab.
     if (SETTINGS_MODE && location.hash) {
       const slug = location.hash.slice(1).toLowerCase();

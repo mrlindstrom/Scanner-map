@@ -34,6 +34,47 @@ WHISPER_MODEL = os.getenv('WHISPER_MODEL')
 TRANSCRIPTION_DEVICE = os.getenv('TRANSCRIPTION_DEVICE')
 OPENAI_TRANSCRIPTION_PROMPT = os.getenv('OPENAI_TRANSCRIPTION_PROMPT')
 
+# Optional decoding settings (local mode). Defaults match the previous
+# hard-coded behaviour; RadioTranscriber recommends beam 10-12, patience 1.5-2,
+# temperature 0 and no_speech_threshold ~0.75 for radio audio.
+def _env_float(name, default):
+    value = os.getenv(name)
+    try:
+        return float(value) if value not in (None, '') else default
+    except ValueError:
+        print(f"WARNING: invalid {name}={value!r}, using {default}", file=sys.stderr)
+        return default
+
+def _env_bool(name, default):
+    value = os.getenv(name)
+    if value in (None, ''):
+        return default
+    return value.strip().lower() == 'true'
+
+def _env_temperature(name):
+    # "0" -> 0.0 (no fallback sampling); "0,0.2,0.4" -> tuple; unset -> faster-whisper default
+    value = os.getenv(name)
+    if value in (None, ''):
+        return None
+    try:
+        temps = tuple(float(t) for t in value.split(',') if t.strip())
+    except ValueError:
+        print(f"WARNING: invalid {name}={value!r}, using faster-whisper default", file=sys.stderr)
+        return None
+    return temps[0] if len(temps) == 1 else temps
+
+WHISPER_BEAM_SIZE = int(_env_float('WHISPER_BEAM_SIZE', 3))
+WHISPER_PATIENCE = _env_float('WHISPER_PATIENCE', 1.0)
+WHISPER_TEMPERATURE = _env_temperature('WHISPER_TEMPERATURE')
+WHISPER_NO_SPEECH_THRESHOLD = _env_float('WHISPER_NO_SPEECH_THRESHOLD', 0.6)
+# Drop individual segments whose no_speech_prob exceeds this (0 = off)
+WHISPER_SEGMENT_NO_SPEECH_DROP = _env_float('WHISPER_SEGMENT_NO_SPEECH_DROP', 0)
+WHISPER_VAD_FILTER = _env_bool('WHISPER_VAD_FILTER', True)
+WHISPER_VAD_MIN_SILENCE_MS = int(_env_float('WHISPER_VAD_MIN_SILENCE_MS', 750))
+# Re-run without VAD when VAD removed everything. Often yields hallucinated
+# text on tone/noise-only clips; set false to leave those empty.
+WHISPER_RETRY_WITHOUT_VAD = _env_bool('WHISPER_RETRY_WITHOUT_VAD', True)
+
 # Validate required environment variables
 required_vars = ['WHISPER_MODEL', 'TRANSCRIPTION_DEVICE']
 missing_vars = [var for var in required_vars if os.getenv(var) is None]
@@ -169,6 +210,12 @@ try:
         cpu_threads=0  # Use default CPU threads (auto-detect)
     )
     logger.info(f"Loaded model: {WHISPER_MODEL} on {device} with compute_type: {compute_type}")
+    logger.info(
+        f"Decoding: beam_size={WHISPER_BEAM_SIZE} patience={WHISPER_PATIENCE} "
+        f"temperature={WHISPER_TEMPERATURE if WHISPER_TEMPERATURE is not None else 'default'} "
+        f"no_speech_threshold={WHISPER_NO_SPEECH_THRESHOLD} segment_drop={WHISPER_SEGMENT_NO_SPEECH_DROP} "
+        f"vad={WHISPER_VAD_FILTER} retry_without_vad={WHISPER_RETRY_WITHOUT_VAD}"
+    )
     
     # Log prompt configuration if available
     if OPENAI_TRANSCRIPTION_PROMPT:
@@ -182,17 +229,9 @@ except Exception as e:
 tone_detector = None
 if TONE_DETECTION_AVAILABLE:
     try:
-        # Get tone detection configuration from environment or use defaults
-        tone_config = {
-            'tone_a_min_length': float(os.getenv('TWO_TONE_MIN_TONE_LENGTH', '0.85')),
-            'tone_b_min_length': float(os.getenv('TWO_TONE_MAX_TONE_LENGTH', '5.0')),
-            'matching_threshold': float(os.getenv('TWO_TONE_DETECTION_THRESHOLD', '2.5')),
-            'fe_freq_band': os.getenv('TWO_TONE_FREQUENCY_BAND', '200,3000'),
-            'two_tone_bw_hz': int(os.getenv('TWO_TONE_BANDWIDTH_HZ', '25')),
-            'two_tone_min_pair_separation_hz': int(os.getenv('TWO_TONE_MIN_PAIR_SEPARATION_HZ', '40')),
-            'time_resolution_ms': int(os.getenv('TWO_TONE_TIME_RESOLUTION_MS', '50'))
-        }
-        tone_detector = ToneDetector(tone_config)
+        # ToneDetector reads the same TONE_*/TWO_TONE_*/PULSED_*/LONG_TONE_* env
+        # vars as the standalone tone_detect.py path, so both behave identically.
+        tone_detector = ToneDetector()
         logger.info("✓ Tone detector initialized with configuration")
     except Exception as e:
         logger.warning(f"Failed to initialize tone detector: {e}")
@@ -284,6 +323,7 @@ while True:
                             "id": request_id,
                             "has_two_tone": detection_result.get('has_two_tone', False),
                             "detected_tones": detected_tones,
+                            "detected_type": detection_result.get('detected_type'),
                             "file_path": audio_file_path
                         }
                         
@@ -369,35 +409,43 @@ while True:
             transcription_params = {
                 'audio': audio_input,  # Can be path string or numpy array
                 'language': 'en',
-                'beam_size': 3,  # Reduced from 5 to 3 for faster processing
-                'vad_filter': True,
-                'vad_parameters': {"min_silence_duration_ms": 750},  # Increased threshold for busy systems
+                'beam_size': WHISPER_BEAM_SIZE,
+                'patience': WHISPER_PATIENCE,
+                'no_speech_threshold': WHISPER_NO_SPEECH_THRESHOLD,
+                'vad_filter': WHISPER_VAD_FILTER,
+                'vad_parameters': {"min_silence_duration_ms": WHISPER_VAD_MIN_SILENCE_MS},
                 'word_timestamps': False,  # Disable word timestamps for speed
-                'condition_on_previous_text': False  # Disable for better performance
+                'condition_on_previous_text': False  # Each call is independent
             }
-            
+            if WHISPER_TEMPERATURE is not None:
+                transcription_params['temperature'] = WHISPER_TEMPERATURE
+
             # Add prompt if available (helps with scanner audio context)
             if OPENAI_TRANSCRIPTION_PROMPT:
                 transcription_params['initial_prompt'] = OPENAI_TRANSCRIPTION_PROMPT
                 logger.info(f"Using custom transcription prompt for ID {request_id}")
-                
+
+            def run_transcription(params):
+                segs, _info = model.transcribe(**params)
+                kept = []
+                for seg in segs:
+                    if WHISPER_SEGMENT_NO_SPEECH_DROP > 0 and seg.no_speech_prob > WHISPER_SEGMENT_NO_SPEECH_DROP:
+                        logger.info(f"Dropping segment for ID {request_id} (no_speech_prob {seg.no_speech_prob:.2f}): {seg.text.strip()!r}")
+                        continue
+                    kept.append(seg.text)
+                return " ".join(kept).strip()
+
             # Try with VAD filtering first - optimized for high-volume systems
-            segments, info = model.transcribe(**transcription_params)
+            transcription = run_transcription(transcription_params)
 
-            segments_text = [segment.text for segment in segments]
-            transcription = " ".join(segments_text).strip()
-
-            # If transcription is empty after VAD filtering, try without VAD
-            if not transcription:
+            # If transcription is empty after VAD filtering, optionally try without VAD
+            if not transcription and WHISPER_VAD_FILTER and WHISPER_RETRY_WITHOUT_VAD:
                 logger.info(f"Retrying transcription for ID {request_id} without VAD filter.")
-                
+
                 # Retry without VAD but keep other parameters including prompt
                 retry_params = transcription_params.copy()
                 retry_params['vad_filter'] = False
-                
-                segments, info = model.transcribe(**retry_params)
-                segments_text = [segment.text for segment in segments]
-                transcription = " ".join(segments_text).strip()
+                transcription = run_transcription(retry_params)
 
             logger.info(f"Transcription successful for ID: {request_id} (length: {len(transcription)} chars)")
             success_response = {"id": request_id, "transcription": transcription}

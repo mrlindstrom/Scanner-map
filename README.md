@@ -236,7 +236,7 @@ Scanner-map/
 | Audio links use the wrong port | Set `PUBLIC_DOMAIN`, or leave it blank to derive `http://localhost:<WEBSERVER_PORT>`. |
 | Port 80 won't bind | Use a different `WEBSERVER_PORT`, or run elevated (Linux) / free the port (Windows IIS/Skype). |
 | Need to redo first-time setup | `node scripts/reset-setup.js` (add `--hard` to also wipe the database). |
-| Logs | `combined.log` and `error.log`, or the Settings → Maintenance log viewer. |
+| Logs | `logs/combined-YYYY-MM-DD.log` and `logs/error-YYYY-MM-DD.log` (rotated daily, `LOG_RETENTION_DAYS` kept, default 3), or the Settings → Maintenance log viewer. |
 
 ---
 

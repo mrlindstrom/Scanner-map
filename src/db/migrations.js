@@ -60,9 +60,14 @@ function runMigrations(db) {
               addColumnIfMissing(db, 'transcriptions', 'system', 'TEXT', () => {
                 // Safe to index now that the column exists.
                 db.run(`CREATE INDEX IF NOT EXISTS idx_transcriptions_system ON transcriptions(system)`, () => {
+                  // Partial index over calls whose audio is parked locally awaiting
+                  // re-upload (src/storage/pendingUploads.js); stays tiny.
+                  db.run(`CREATE INDEX IF NOT EXISTS idx_transcriptions_pending_upload
+                            ON transcriptions(storage_key) WHERE storage_mode = 'pending'`, () => {
                   migrateTalkGroupsToComposite(db, () => {
                     log.info('migrations complete (indexes + storage + multi-system ensured)');
                     resolve();
+                  });
                   });
                 });
               });

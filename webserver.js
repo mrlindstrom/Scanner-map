@@ -2,6 +2,15 @@
 
 require('dotenv').config();
 
+// Shared console layout. Routine INFO (map polling, socket connects, audio
+// serving) is hidden unless LOG_CONSOLE_VERBOSE=true; warnings/errors always show.
+const WEB_STARTUP_INFO = [
+  /^Web server running/, /^Audio URL base/, /^Authentication:/, /^Session duration/,
+  /^Max sessions/, /^Storage mode/, /API key (found|not found)/, /^Connected to the SQLite/,
+];
+require('./src/consoleFormat').patchConsole('web', (level, message) =>
+  level !== 'info' || WEB_STARTUP_INFO.some((re) => re.test(message)));
+
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
@@ -14,6 +23,7 @@ const fs = require('fs');
 // --- Modernized shared modules ---
 const { applyBaseSecurity, apiLimiter, authLimiter } = require('./src/security/middleware');
 const { createStorage, isDbMode, buildKey } = require('./src/storage');
+const pendingUploads = require('./src/storage/pendingUploads');
 const { mountSetup } = require('./src/setup/routes');
 const { runMigrations } = require('./src/db/migrations');
 const { getPublicBaseUrl } = require('./src/utils/publicUrl');
@@ -98,6 +108,11 @@ app.get('/setup', (req, res) => res.sendFile(path.join(__dirname, 'public', 'set
 // --- Live Settings page (reuses the /api/setup/* endpoints) ---
 app.use('/settings', express.static(path.join(__dirname, 'public', 'settings')));
 app.get('/settings', (req, res) => res.sendFile(path.join(__dirname, 'public', 'settings', 'index.html')));
+
+// Theme files load in <head> of /settings, which is served before auth; keep
+// them public too (nothing private in them) so opening Settings doesn't hit a
+// login prompt for a stylesheet/script.
+app.get(['/theme.js', '/themes.css'], (req, res) => res.sendFile(path.join(__dirname, 'public', req.path)));
 
 // --- Map defaults (center/zoom) so auto-located setups recenter the map ---
 app.get('/api/config/map', (req, res) => {
@@ -278,6 +293,57 @@ async function createSession(userId, req) {
   });
 }
 
+const dbGetAsync = (sql, params) => new Promise((resolve, reject) =>
+  db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row))));
+const dbRunAsync = (sql, params) => new Promise((resolve, reject) =>
+  db.run(sql, params, (err) => (err ? reject(err) : resolve())));
+
+// In-flight session lookups, so the burst of parallel requests from one page
+// load shares a single new session instead of each creating its own.
+const pendingBasicSessions = new Map();
+
+/**
+ * Session for a Basic-auth request: the newest unexpired session for this user
+ * from the same browser (IP + user agent), or a new one. The MAX_SESSIONS cap
+ * is only applied when a new session is actually created.
+ */
+function getOrCreateBasicSession(userId, req) {
+  const ipAddress = req.ip;
+  const userAgent = req.get('user-agent') || '';
+  const key = `${userId}|${ipAddress}|${userAgent}`;
+  if (pendingBasicSessions.has(key)) return pendingBasicSessions.get(key);
+
+  const work = (async () => {
+    const existing = await dbGetAsync(
+      `SELECT token, expires_at FROM sessions
+       WHERE user_id = ? AND ip_address IS ? AND user_agent IS ? AND expires_at > datetime('now')
+       ORDER BY created_at DESC LIMIT 1`,
+      [userId, ipAddress, userAgent]
+    );
+    if (existing) {
+      await dbRunAsync('UPDATE sessions SET last_activity = CURRENT_TIMESTAMP WHERE token = ?', [existing.token]);
+      return { token: existing.token, expiresAt: existing.expires_at };
+    }
+
+    // New browser/device: make room under the cap (oldest first), then create
+    if (MAX_SESSIONS > 0) {
+      await dbRunAsync(
+        `DELETE FROM sessions WHERE id IN (
+           SELECT id FROM sessions
+           WHERE user_id = ? AND expires_at > datetime('now')
+           ORDER BY created_at DESC LIMIT -1 OFFSET ?
+         )`,
+        [userId, MAX_SESSIONS - 1]
+      );
+    }
+    return createSession(userId, req);
+  })();
+
+  pendingBasicSessions.set(key, work);
+  work.finally(() => pendingBasicSessions.delete(key)).catch(() => {});
+  return work;
+}
+
 async function validateSession(token) {
   return new Promise((resolve, reject) => {
     db.get(
@@ -383,7 +449,8 @@ Category:`;
             prompt: commonPrompt, // The prompt is compatible
             stream: false,
             options: {
-                temperature: 0.3
+                temperature: 0.3,
+				num_ctx: 8192
             }
           }),
           signal: controller.signal
@@ -516,53 +583,18 @@ const basicAuth = async (req, res, next) => {
 
           const hashedPassword = hashPassword(password, user.salt);
           if (hashedPassword === user.password_hash) {
-            // Get all active sessions for user, ordered by creation date
-            db.all(
-              `SELECT id, created_at, expires_at 
-               FROM sessions 
-               WHERE user_id = ? AND expires_at > datetime('now')
-               ORDER BY created_at ASC`,
-              [user.id],
-              async (err, sessions) => {
-                if (err) {
-                  return res.status(500).send('Internal server error.');
-                }
-
-                // If at session limit, remove oldest session
-                if (sessions.length >= MAX_SESSIONS) {
-                  db.run(
-                    'DELETE FROM sessions WHERE id = ?',
-                    [sessions[0].id],
-                    async (err) => {
-                      if (err) {
-                        console.error('Error removing oldest session:', err);
-                        return res.status(500).send('Internal server error.');
-                      }
-                      console.log(`Removed oldest session for user ${username}`);
-                      try {
-                        const session = await createSession(user.id, req);
-                        req.user = { id: user.id, username };
-                        req.session = session;
-                        next();
-                      } catch (err) {
-                        console.error('Error creating session:', err);
-                        return res.status(500).send('Internal server error.');
-                      }
-                    }
-                  );
-                } else {
-                  try {
-                    const session = await createSession(user.id, req);
-                    req.user = { id: user.id, username };
-                    req.session = session;
-                    next();
-                  } catch (err) {
-                    console.error('Error creating session:', err);
-                    return res.status(500).send('Internal server error.');
-                  }
-                }
-              }
-            );
+            // Browsers resend Basic credentials on every request, so reuse this
+            // browser's session rather than minting one per request (which
+            // churned through MAX_SESSIONS and evicted tokens still in use).
+            try {
+              const session = await getOrCreateBasicSession(user.id, req);
+              req.user = { id: user.id, username };
+              req.session = session;
+              next();
+            } catch (err) {
+              console.error('Error creating session:', err);
+              return res.status(500).send('Internal server error.');
+            }
           } else {
             res.set('WWW-Authenticate', 'Basic realm="Protected Area"');
             return res.status(401).send('Invalid credentials.');
@@ -777,6 +809,18 @@ app.get('/audio/:id', async (req, res) => {
     });
 
     const key = transcriptionRow && (transcriptionRow.storage_key || transcriptionRow.audio_file_path);
+
+    // Remote storage was down when this call came in: play the locally parked
+    // copy until the re-upload job moves it (see src/storage/pendingUploads.js)
+    if (key && transcriptionRow.storage_mode === pendingUploads.PENDING_MODE) {
+      let parked = null;
+      try { parked = pendingUploads.pendingPath(key); } catch (_) { /* invalid key */ }
+      if (parked && fs.existsSync(parked)) {
+        res.setHeader('Content-Type', path.extname(key).toLowerCase() === '.m4a' ? 'audio/mp4' : 'audio/mpeg');
+        return fs.createReadStream(parked).pipe(res);
+      }
+      // Not there any more: it was just re-uploaded, so read it from storage below
+    }
 
     if (key && storage) {
       const extension = path.extname(key).toLowerCase();

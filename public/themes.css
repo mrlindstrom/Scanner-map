@@ -1,0 +1,566 @@
+/*
+ * themes.css - Scanner Map themes.
+ *
+ * styles.css lays out the UI and reads every color/font from the variables
+ * below. Each theme is a [data-theme="..."] block (set on <html> by theme.js);
+ * themes that need more than colors add component rules after their block.
+ *
+ * To add a theme: copy a variable block, give it a new data-theme id, and add
+ * it to the THEMES list in theme.js.
+ *
+ * Variables:
+ *   --font-family          UI font
+ *   --background-color     panel / page background
+ *   --surface-color        secondary surfaces (lists, inputs)
+ *   --text-color           body text
+ *   --primary-color/-rgb   main accent (headings, active items, glows)
+ *   --border-color         outlines
+ *   --hover-color/-rgb     hovered / selected backgrounds
+ *   --accent-color/-rgb    secondary highlight (categories, place names)
+ *   --danger-color/-rgb    errors, delete actions;  --danger-bg its background
+ *   --panel-rgb            translucent panel backgrounds, as "r, g, b"
+ *   --shadow-rgb           drop shadows, as "r, g, b"
+ *   --wave-*               audio waveform colors (read by app.js)
+ */
+
+/* ---------- Original: green phosphor terminal (the classic Scanner Map look) ---------- */
+:root,
+[data-theme="original"] {
+  --font-family: 'Share Tech Mono', monospace;
+  --background-color: #000000;
+  --surface-color: #0d0d0d;
+  --text-color: #00ff00;
+  --primary-color: #00ff00;
+  --primary-rgb: 0, 255, 0;
+  --border-color: #00ff00;
+  --hover-color: #003300;
+  --hover-rgb: 0, 51, 0;
+  --accent-color: #00ccff;
+  --accent-rgb: 0, 204, 255;
+  --danger-color: #ff0000;
+  --danger-rgb: 255, 0, 0;
+  --danger-bg: #330000;
+  --panel-rgb: 0, 0, 0;
+  --shadow-rgb: 0, 0, 0;
+  --wave-color: #00ff00;
+  --wave-progress-color: #008000;
+  --wave-cursor-color: #ffffff;
+  color-scheme: dark;
+}
+
+/* ---------- Amber Terminal: amber phosphor CRT ---------- */
+[data-theme="amber"] {
+  --font-family: 'Share Tech Mono', monospace;
+  --background-color: #000000;
+  --surface-color: #0f0a00;
+  --text-color: #ffb000;
+  --primary-color: #ffb000;
+  --primary-rgb: 255, 176, 0;
+  --border-color: #ffb000;
+  --hover-color: #3a2700;
+  --hover-rgb: 58, 39, 0;
+  --accent-color: #ffe08a;
+  --accent-rgb: 255, 224, 138;
+  --danger-color: #ff5a36;
+  --danger-rgb: 255, 90, 54;
+  --danger-bg: #3a0f00;
+  --panel-rgb: 0, 0, 0;
+  --shadow-rgb: 0, 0, 0;
+  --wave-color: #ffb000;
+  --wave-progress-color: #a86f00;
+  --wave-cursor-color: #fff4d6;
+  color-scheme: dark;
+}
+
+/* ---------- Midnight: modern dark ---------- */
+[data-theme="midnight"] {
+  --font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --background-color: #0f172a;
+  --surface-color: #111c33;
+  --text-color: #e2e8f0;
+  --primary-color: #60a5fa;
+  --primary-rgb: 96, 165, 250;
+  --border-color: #334155;
+  --hover-color: #1e293b;
+  --hover-rgb: 30, 41, 59;
+  --accent-color: #38bdf8;
+  --accent-rgb: 56, 189, 248;
+  --danger-color: #f87171;
+  --danger-rgb: 248, 113, 113;
+  --danger-bg: #3b1219;
+  --panel-rgb: 15, 23, 42;
+  --shadow-rgb: 0, 0, 0;
+  --wave-color: #60a5fa;
+  --wave-progress-color: #2563eb;
+  --wave-cursor-color: #e2e8f0;
+  color-scheme: dark;
+}
+
+/* ---------- Daylight: modern light ---------- */
+[data-theme="daylight"] {
+  --font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --background-color: #ffffff;
+  --surface-color: #f1f5f9;
+  --text-color: #0f172a;
+  --primary-color: #2563eb;
+  --primary-rgb: 37, 99, 235;
+  --border-color: #cbd5e1;
+  --hover-color: #e0e7ff;
+  --hover-rgb: 224, 231, 255;
+  --accent-color: #0e7490;
+  --accent-rgb: 14, 116, 144;
+  --danger-color: #dc2626;
+  --danger-rgb: 220, 38, 38;
+  --danger-bg: #fee2e2;
+  --panel-rgb: 255, 255, 255;
+  --shadow-rgb: 15, 23, 42;
+  --wave-color: #2563eb;
+  --wave-progress-color: #1e3a8a;
+  --wave-cursor-color: #0f172a;
+  color-scheme: light;
+}
+
+/* Modern themes: soft neutral shadows instead of colored glows, rounded corners */
+[data-theme="midnight"] *,
+[data-theme="daylight"] * {
+  text-shadow: none !important;
+}
+[data-theme="midnight"] #control-panel,
+[data-theme="midnight"] .modal-content,
+[data-theme="midnight"] .dropdown-content,
+[data-theme="midnight"] .leaflet-popup-content-wrapper,
+[data-theme="midnight"] #category-sidebar,
+[data-theme="daylight"] #control-panel,
+[data-theme="daylight"] .modal-content,
+[data-theme="daylight"] .dropdown-content,
+[data-theme="daylight"] .leaflet-popup-content-wrapper,
+[data-theme="daylight"] #category-sidebar {
+  box-shadow: 0 8px 24px rgba(var(--shadow-rgb), 0.28) !important;
+  border-radius: 10px;
+}
+[data-theme="midnight"] #control-panel,
+[data-theme="daylight"] #control-panel {
+  border-radius: 0 0 10px 10px;
+}
+[data-theme="midnight"] button,
+[data-theme="midnight"] select,
+[data-theme="midnight"] input,
+[data-theme="daylight"] button,
+[data-theme="daylight"] select,
+[data-theme="daylight"] input {
+  border-radius: 6px;
+  box-shadow: none;
+}
+[data-theme="midnight"] .modal-content h2,
+[data-theme="daylight"] .modal-content h2 {
+  color: var(--text-color);
+}
+[data-theme="daylight"] #control-panel {
+  background: rgba(255, 255, 255, 0.92);
+}
+
+/* ---------- Windows 95 ---------- */
+[data-theme="win95"] {
+  --font-family: 'Microsoft Sans Serif', 'MS Sans Serif', Tahoma, Arial, sans-serif;
+  --background-color: #c0c0c0;
+  --surface-color: #ffffff;
+  --text-color: #000000;
+  --primary-color: #000080;
+  --primary-rgb: 0, 0, 128;
+  --border-color: #808080;
+  --hover-color: #a6caf0;
+  --hover-rgb: 166, 202, 240;
+  --accent-color: #008080;
+  --accent-rgb: 0, 128, 128;
+  --danger-color: #c00000;
+  --danger-rgb: 192, 0, 0;
+  --danger-bg: #ffe0e0;
+  --panel-rgb: 192, 192, 192;
+  --shadow-rgb: 0, 0, 0;
+  /* Sound Recorder's green trace on a black display */
+  --wave-color: #008000;
+  --wave-progress-color: #00ff00;
+  --wave-cursor-color: #00ff00;
+  /* Classic 3D edges (outer + inner bevel) */
+  --win95-raised: inset -1px -1px #0a0a0a, inset 1px 1px #ffffff, inset -2px -2px #808080, inset 2px 2px #dfdfdf;
+  --win95-sunken: inset -1px -1px #ffffff, inset 1px 1px #0a0a0a, inset -2px -2px #dfdfdf, inset 2px 2px #808080;
+  --win95-title: linear-gradient(90deg, #000080, #1084d0);
+  color-scheme: light;
+}
+
+[data-theme="win95"] body {
+  font-size: 12px;
+  background: #008080; /* the desktop */
+}
+[data-theme="win95"] *,
+[data-theme="win95"] *::before,
+[data-theme="win95"] *::after {
+  border-radius: 0 !important;
+  text-shadow: none !important;
+  transition: none !important;
+}
+
+/* Windows: raised gray panels */
+[data-theme="win95"] #control-panel,
+[data-theme="win95"] #category-sidebar,
+[data-theme="win95"] .modal-content,
+[data-theme="win95"] .dropdown-content,
+[data-theme="win95"] .leaflet-popup-content-wrapper,
+[data-theme="win95"] .leaflet-bar,
+[data-theme="win95"] .leaflet-control-zoom,
+[data-theme="win95"] .locationiq-dropdown,
+[data-theme="win95"] #live-feed-display {
+  background: #c0c0c0 !important;
+  color: #000000;
+  border: none !important;
+  box-shadow: var(--win95-raised) !important;
+}
+[data-theme="win95"] #control-panel {
+  padding: 6px 8px;
+}
+[data-theme="win95"] .leaflet-popup-tip {
+  background: #c0c0c0 !important;
+  border: none !important;
+  box-shadow: 1px 1px 0 #0a0a0a !important;
+}
+
+/* Dialog title bars */
+[data-theme="win95"] .modal-content {
+  padding: 3px 16px 16px;
+}
+[data-theme="win95"] .modal-content h2,
+[data-theme="win95"] .category-header {
+  background: var(--win95-title) !important;
+  color: #ffffff !important;
+  font-size: 12px;
+  font-weight: bold;
+  letter-spacing: 0;
+  margin: 0 -13px 12px;
+  padding: 4px 6px;
+  border: none !important;
+  text-align: left;
+}
+[data-theme="win95"] .category-header {
+  margin: 0 0 4px;
+}
+
+/* Buttons: raised, pressed when active, no hover color */
+[data-theme="win95"] button,
+[data-theme="win95"] .cyberpunk-button,
+[data-theme="win95"] #control-panel button,
+[data-theme="win95"] .modal-buttons button,
+[data-theme="win95"] .modal-content button,
+[data-theme="win95"] .time-preset-btn,
+[data-theme="win95"] #sidebar-toggle-btn,
+[data-theme="win95"] .leaflet-bar a,
+[data-theme="win95"] .leaflet-control-zoom a {
+  background: #c0c0c0 !important;
+  color: #000000 !important;
+  border: none !important;
+  box-shadow: var(--win95-raised) !important;
+  font-family: var(--font-family);
+  font-size: 12px;
+  padding: 4px 12px;
+  min-height: 23px;
+}
+[data-theme="win95"] .leaflet-bar a,
+[data-theme="win95"] .leaflet-control-zoom a {
+  padding: 0;
+}
+[data-theme="win95"] button:hover,
+[data-theme="win95"] .modal-buttons button:hover,
+[data-theme="win95"] #control-panel button:hover,
+[data-theme="win95"] .leaflet-bar a:hover {
+  background: #c0c0c0 !important;
+  color: #000000 !important;
+}
+[data-theme="win95"] button:active,
+[data-theme="win95"] .modal-buttons button:active,
+[data-theme="win95"] #control-panel button:active,
+[data-theme="win95"] .time-preset-btn.active,
+[data-theme="win95"] .leaflet-bar a:active {
+  box-shadow: var(--win95-sunken) !important;
+  padding-top: 5px;
+}
+[data-theme="win95"] button:focus-visible {
+  outline: 1px dotted #000000;
+  outline-offset: -4px;
+}
+[data-theme="win95"] button:disabled {
+  color: #808080 !important;
+  text-shadow: 1px 1px #ffffff !important;
+}
+
+/* Fields: sunken white */
+[data-theme="win95"] input[type="text"],
+[data-theme="win95"] input[type="search"],
+[data-theme="win95"] input[type="password"],
+[data-theme="win95"] input[type="date"],
+[data-theme="win95"] input[type="time"],
+[data-theme="win95"] input[type="number"],
+[data-theme="win95"] select,
+[data-theme="win95"] textarea,
+[data-theme="win95"] #control-panel select,
+[data-theme="win95"] #control-panel input[type="text"] {
+  background: #ffffff !important;
+  color: #000000 !important;
+  border: none !important;
+  box-shadow: var(--win95-sunken) !important;
+  font-family: var(--font-family);
+  font-size: 12px;
+  padding: 3px 4px;
+}
+[data-theme="win95"] input::placeholder {
+  color: #808080 !important;
+}
+
+/* Checkboxes: white sunken box with a black tick */
+[data-theme="win95"] input[type="checkbox"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  margin: 0 4px 0 0;
+  background: #ffffff !important;
+  border: none !important;
+  box-shadow: var(--win95-sunken) !important;
+  position: relative;
+  vertical-align: middle;
+}
+[data-theme="win95"] input[type="checkbox"]:checked::after {
+  content: '' !important;
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 3px;
+  height: 7px;
+  border: solid #000000;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+  background: none !important;
+  box-shadow: none !important;
+}
+
+/* Menus and list selection: navy highlight */
+[data-theme="win95"] .dropdown-content a {
+  color: #000000 !important;
+  padding: 4px 20px;
+}
+[data-theme="win95"] .dropdown-content a:hover,
+[data-theme="win95"] .locationiq-item:hover,
+[data-theme="win95"] .live-feed-tg-item.selected {
+  background: #000080 !important;
+  color: #ffffff !important;
+}
+
+/* Status bar along the bottom */
+[data-theme="win95"] #summary-bar {
+  background: #c0c0c0 !important;
+  color: #000000;
+  border: none !important;
+  box-shadow: var(--win95-raised) !important;
+}
+[data-theme="win95"] #summary-bar .ticker-wrap {
+  box-shadow: var(--win95-sunken);
+  background: #c0c0c0;
+}
+[data-theme="win95"] .ticker-item {
+  color: #000000 !important;
+}
+
+/* Popups read like a window: black text on gray */
+[data-theme="win95"] .leaflet-popup-content,
+[data-theme="win95"] .leaflet-popup-content * {
+  color: #000000;
+}
+[data-theme="win95"] .leaflet-popup-content a {
+  color: #0000ee;
+}
+
+/* Classic scroll bars */
+[data-theme="win95"] ::-webkit-scrollbar {
+  width: 16px;
+  height: 16px;
+}
+[data-theme="win95"] ::-webkit-scrollbar-track {
+  background: repeating-conic-gradient(#c0c0c0 0% 25%, #ffffff 0% 50%) 50% / 2px 2px;
+}
+[data-theme="win95"] ::-webkit-scrollbar-thumb {
+  background: #c0c0c0;
+  border: none;
+  box-shadow: var(--win95-raised);
+}
+[data-theme="win95"] * {
+  scrollbar-color: #c0c0c0 #e0e0e0;
+}
+
+/* Audio player extras (added by app.js attachRecorderControls) are only
+   shown by themes that style them */
+.sr-readout,
+.sr-track,
+.sr-btn {
+  display: none;
+}
+
+/* Windows 95: the call player is the classic Sound Recorder.
+   Position/Length labels, a black display with a green trace, a trackbar,
+   and a row of beveled transport buttons:  <<  >>  >  []  (o)  */
+[data-theme="win95"] .sr-readout {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+  font-size: 11px;
+  color: #000000;
+}
+[data-theme="win95"] .sr-readout span {
+  display: flex;
+  flex-direction: column;
+}
+[data-theme="win95"] .sr-readout span:last-child {
+  text-align: right;
+}
+[data-theme="win95"] .sr-readout b {
+  font-weight: normal;
+}
+[data-theme="win95"] .waveform {
+  background: #000000 !important;
+  border: none !important;
+  box-shadow: var(--win95-sunken) !important;
+  padding: 3px;
+  margin-top: 2px;
+}
+[data-theme="win95"] .sr-track {
+  display: block;
+  width: 100%;
+  margin: 8px 0 2px;
+  height: 22px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  box-shadow: none !important;
+  padding: 0;
+}
+/* Trackbar: sunken groove with a raised pointer */
+[data-theme="win95"] .sr-track::-webkit-slider-runnable-track {
+  height: 4px;
+  background: #ffffff;
+  box-shadow: var(--win95-sunken);
+}
+[data-theme="win95"] .sr-track::-moz-range-track {
+  height: 4px;
+  background: #ffffff;
+  box-shadow: var(--win95-sunken);
+}
+[data-theme="win95"] .sr-track::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 11px;
+  height: 21px;
+  margin-top: -9px;
+  background: #c0c0c0;
+  box-shadow: var(--win95-raised);
+  border: none;
+}
+[data-theme="win95"] .sr-track::-moz-range-thumb {
+  width: 11px;
+  height: 21px;
+  background: #c0c0c0;
+  box-shadow: var(--win95-raised);
+  border: none;
+  border-radius: 0;
+}
+
+/* Transport row */
+[data-theme="win95"] .audio-controls {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 0;
+}
+[data-theme="win95"] .sr-btn,
+[data-theme="win95"] .audio-controls .play-pause.sr-play {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  min-width: 40px;
+  height: 26px;
+  padding: 0 !important;
+  margin: 0 !important;
+  font-size: 0 !important; /* hide the Play/Pause text; the glyph is drawn below */
+  line-height: 0;
+  color: #000000 !important;
+}
+[data-theme="win95"] .audio-controls .sr-record {
+  margin-right: 12px !important;
+}
+[data-theme="win95"] .sr-btn::before,
+[data-theme="win95"] .play-pause.sr-play::before {
+  font-size: 11px;
+  line-height: 1;
+  letter-spacing: -2px;
+  font-family: Arial, sans-serif;
+}
+[data-theme="win95"] .sr-rewind::before { content: '\25C0\25C0'; }
+[data-theme="win95"] .sr-forward::before { content: '\25B6\25B6'; }
+[data-theme="win95"] .play-pause.sr-play::before { content: '\25B6'; font-size: 13px; letter-spacing: 0; }
+[data-theme="win95"] .sr-stop::before { content: ''; width: 9px; height: 9px; background: #000000; }
+[data-theme="win95"] .sr-record::before {
+  content: '';
+  width: 10px;
+  height: 10px;
+  border-radius: 50% !important;
+  background: #800000;
+}
+[data-theme="win95"] .sr-record:disabled::before {
+  background: #808080;
+  box-shadow: 1px 1px #ffffff;
+}
+
+/* Theme picker inside the Settings menu */
+.theme-picker-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 12px;
+  color: var(--text-color);
+}
+.theme-picker-row select {
+  width: 100%;
+  padding: 4px;
+  background: var(--surface-color);
+  color: var(--text-color);
+  border: 1px solid var(--border-color);
+  font-family: var(--font-family);
+}
+
+/* Heatmap panel per theme */
+[data-theme="midnight"] .heatmap-panel,
+[data-theme="daylight"] .heatmap-panel {
+  box-shadow: 0 8px 24px rgba(var(--shadow-rgb), 0.28);
+  border-radius: 10px;
+}
+[data-theme="win95"] .heatmap-panel {
+  background: #c0c0c0;
+  color: #000000;
+  border: none;
+  box-shadow: var(--win95-raised);
+  padding: 3px 8px 8px;
+}
+[data-theme="win95"] .heatmap-panel-title {
+  background: var(--win95-title);
+  color: #ffffff;
+  margin: 0 -5px 8px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+[data-theme="win95"] .heatmap-hotspots {
+  background: #ffffff;
+  box-shadow: var(--win95-sunken);
+  padding: 2px;
+}
+[data-theme="win95"] .heatmap-hotspot { border-top: none; }
+[data-theme="win95"] .heatmap-hotspot:hover,
+[data-theme="win95"] .heatmap-hotspot:focus { background: #000080; color: #ffffff; }
+[data-theme="win95"] .hotspot-rank { background: #000080; color: #ffffff; }
+[data-theme="win95"] .heatmap-legend i { box-shadow: var(--win95-sunken); }

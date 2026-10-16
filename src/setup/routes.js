@@ -429,7 +429,7 @@ function mountSetup(app, deps = {}) {
   app.get('/api/setup/db-stats', async (req, res) => res.json(await maintenance.dbStats(getDb())));
   app.get('/api/setup/logs', (req, res) => res.json({ logs: maintenance.listLogs() }));
   app.get('/api/setup/log-tail', (req, res) =>
-    res.json(maintenance.tailLog(req.query.name || 'combined.log', parseInt(req.query.lines, 10) || 200)));
+    res.json(maintenance.tailLog(req.query.name, parseInt(req.query.lines, 10) || 200)));
 
   // Download a backup of the SQLite database.
   app.get('/api/setup/backup-db', (req, res) => {

@@ -46,3 +46,6 @@ Thumbs.db
 
 # Runtime-generated AI summary (regenerated on the fly)
 public/summary.json
+
+# Old Python virtualenv backups
+.venv-*/

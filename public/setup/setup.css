@@ -180,6 +180,12 @@ hr.sep { border: none; border-top: 1px solid var(--border); margin: 22px 0; }
   white-space: pre-wrap; word-break: break-word; color: #b6c2d6; font-family: ui-monospace, Menlo, Consolas, monospace;
 }
 
+/* Log / changelog panels (Settings > Maintenance, Updates); themed in settings.css */
+.log-view {
+  background: #0a0f0a; color: #99ff99; padding: 10px; border-radius: 6px;
+  font-size: 12px; white-space: pre-wrap; overflow: auto;
+}
+
 /* ---- Talkgroup controls ---- */
 .tg-controls { display: flex; gap: 10px; margin: 14px 0 10px; flex-wrap: wrap; }
 .tg-controls input { flex: 2; min-width: 200px; }

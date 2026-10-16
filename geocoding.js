@@ -3,6 +3,8 @@
 require('dotenv').config();
 const fetch = require('node-fetch');
 const winston = require('winston');
+const { getFileTransports } = require('./src/logger');
+const { consoleFormat } = require('./src/consoleFormat');
 const moment = require('moment-timezone');
 const fs = require('fs');
 const path = require('path');
@@ -98,27 +100,13 @@ const logger = winston.createLogger({
     winston.format.timestamp({
       format: () => moment().tz(TIMEZONE).format('MM/DD/YYYY HH:mm:ss.SSS')
     }),
-    winston.format.printf(({ timestamp, level, message }) => {
-      if (message.includes('Talk Group') ||
-          message.includes('Incoming Request')) {
-        return `${timestamp} \x1b[33m[${level.toUpperCase()}] ${message}\x1b[0m`;
-      }
-      if (message.includes('Extracted Address') ||
-          message.includes('Geocoded Address')) {
-        return `${timestamp} \x1b[32m[${level.toUpperCase()}] ${message}\x1b[0m`;
-      }
-      if (level === 'info') {
-        return `${timestamp} \x1b[37m[${level.toUpperCase()}] ${message}\x1b[0m`;
-      }
-      const colors = { error: '\x1b[31m', warn: '\x1b[33m', debug: '\x1b[36m' };
-      const color = colors[level] || '\x1b[37m';
-      return `${timestamp} ${color}[${level.toUpperCase()}] ${message}\x1b[0m`;
-    })
+    winston.format.errors({ stack: true }),
+    winston.format.json()
   ),
   transports: [
-    new winston.transports.File({ filename: 'error.log', level: 'error' }),
-    new winston.transports.File({ filename: 'combined.log' }),
-    new winston.transports.Console()
+    // Daily-rotated JSON files in ./logs, shared with bot.js (see src/logger.js)
+    ...getFileTransports(),
+    new winston.transports.Console({ format: consoleFormat({ source: 'geocode' }) })
   ]
 });
 
@@ -386,7 +374,7 @@ async function callLLM(prompt, opts = {}) {
           prompt,
           stream: false,
           think: false,
-          options: { temperature: 0, top_p: 0.1, num_predict: maxTokens },
+          options: { temperature: 0, top_p: 0.1, num_predict: maxTokens, num_ctx: 8192 },
         }),
         signal: controller.signal,
       });
@@ -563,7 +551,7 @@ Transcript (from ${town}):
             // Deterministic, low-creativity decoding for reliable extraction.
             // Without this, Ollama uses the model default (~0.8) and the same
             // transcript intermittently yields "No address found".
-            options: { temperature: 0, top_p: 0.1, num_predict: 800 }
+            options: { temperature: 0, top_p: 0.1, num_predict: 800, num_ctx: 8192 }
           }),
           signal: controller.signal
         });

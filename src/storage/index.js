@@ -58,13 +58,26 @@ function isDbMode(env = process.env) {
   return (env.STORAGE_MODE || 'local').toLowerCase() === 'db';
 }
 
-/** Build a date-partitioned object key, e.g. 2026/06/19/<name>. */
+/**
+ * Build a date-partitioned object key, e.g. 2026/06/19/14/<name>.
+ *
+ * Object-store backends (MinIO, RustFS, ...) materialize one directory per
+ * object on the underlying filesystem. Writing every recording with a flat key
+ * piles millions of sibling directories into the bucket root, which makes the
+ * backend's list / scanner / heal passes degrade badly. Partitioning by UTC
+ * hour bounds any single directory to roughly one hour of ingest.
+ *
+ * `date` is the call's own timestamp when known; an invalid/absent value falls
+ * back to "now" so a key is always produced.
+ */
 function buildKey(filename, date = new Date()) {
-  const y = date.getUTCFullYear();
-  const m = String(date.getUTCMonth() + 1).padStart(2, '0');
-  const d = String(date.getUTCDate()).padStart(2, '0');
+  const d = date instanceof Date && !Number.isNaN(date.getTime()) ? date : new Date();
+  const y = d.getUTCFullYear();
+  const mo = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  const hr = String(d.getUTCHours()).padStart(2, '0');
   const safe = String(filename).replace(/[^a-zA-Z0-9._-]/g, '_');
-  return `${y}/${m}/${d}/${safe}`;
+  return `${y}/${mo}/${day}/${hr}/${safe}`;
 }
 
 module.exports = { createStorage, isDbMode, buildKey, LocalStorage, S3Storage };

@@ -19,6 +19,9 @@
   <script src="https://unpkg.com/wavesurfer.js"></script>
   <script src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
 
+  <!-- Theme: applies the saved theme before first paint (see themes.css) -->
+  <script src="theme.js"></script>
+
   <!-- Custom CSS -->
   <link rel="stylesheet" href="styles.css" />
   <link rel="icon" type="image/x-icon" href="/favicon.ico" />
@@ -86,20 +89,20 @@
     }
 
     .terminate-session-btn {
-      background-color: #330000;
-      color: #ff0000;
-      border: 1px solid #ff0000;
+      background-color: var(--danger-bg);
+      color: var(--danger-color);
+      border: 1px solid var(--danger-color);
       padding: 5px 10px;
       cursor: pointer;
       border-radius: 4px;
-      font-family: 'Share Tech Mono', monospace;
+      font-family: var(--font-family);
       transition: all 0.3s;
     }
 
     .terminate-session-btn:hover {
-      background-color: #ff0000;
+      background-color: var(--danger-color);
       color: var(--background-color);
-      box-shadow: 0 0 10px #ff0000;
+      box-shadow: 0 0 10px var(--danger-color);
     }
 
     .current-session {
@@ -205,11 +208,11 @@
       width: 90%;
       max-width: 500px;
       max-height: 150px; /* Approx 5 lines */
-      background-color: rgba(0, 0, 0, 0.85);
+      background-color: rgba(var(--panel-rgb), 0.85);
       color: var(--text-color);
       border: 1px solid var(--border-color);
       border-radius: 4px;
-      box-shadow: 0 0 15px rgba(0, 255, 0, 0.5);
+      box-shadow: 0 0 15px rgba(var(--primary-rgb), 0.5);
       z-index: 997; /* Below control panel/modals, above map */
       overflow: hidden; /* Prevent scrollbars */
       display: flex;
@@ -223,12 +226,12 @@
     .live-feed-item {
       padding: 4px 8px;
       margin-bottom: 3px; /* Space between items */
-      font-family: 'Share Tech Mono', monospace;
+      font-family: var(--font-family);
       font-size: 14px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      background-color: rgba(0, 20, 0, 0.7); /* Slight background */
+      background-color: rgba(var(--hover-rgb), 0.7); /* Slight background */
       border-radius: 3px;
       opacity: 1;
       transition: opacity 1.5s ease-out; /* Slower fade out */
@@ -240,7 +243,7 @@
     }
 
     .live-feed-item strong {
-        color: #00ccff; /* Highlight talkgroup name */
+        color: var(--accent-color); /* Highlight talkgroup name */
         margin-right: 5px;
     }
 
@@ -280,11 +283,11 @@
     #live-feed-search {
         width: 100%;
         padding: 8px 10px;
-        background-color: #000;
-        color: #00ff00;
-        border: 1px solid #00ff00;
+        background-color: var(--background-color);
+        color: var(--primary-color);
+        border: 1px solid var(--primary-color);
         border-radius: 4px;
-        font-family: 'Share Tech Mono', monospace;
+        font-family: var(--font-family);
         font-size: 14px;
         box-sizing: border-box;
         margin-bottom: 15px;
@@ -295,8 +298,8 @@
         justify-content: space-around;
         padding: 10px 0;
         margin-bottom: 15px;
-        border-top: 1px solid rgba(0, 255, 0, 0.2);
-        border-bottom: 1px solid rgba(0, 255, 0, 0.2);
+        border-top: 1px solid rgba(var(--primary-rgb), 0.2);
+        border-bottom: 1px solid rgba(var(--primary-rgb), 0.2);
     }
 
     .live-feed-master-controls label {
@@ -319,7 +322,7 @@
       overflow-y: auto; /* Enable scrolling */
       padding-right: 10px; /* Space for scrollbar */
       margin-bottom: 15px;
-      border: 1px solid rgba(0, 255, 0, 0.2);
+      border: 1px solid rgba(var(--primary-rgb), 0.2);
       padding: 5px;
       min-height: 200px; /* Ensure it has some height */
     }
@@ -330,19 +333,19 @@
     }
 
     #live-feed-talkgroup-list::-webkit-scrollbar-track {
-      background: rgba(0, 0, 0, 0.3);
+      background: rgba(var(--panel-rgb), 0.3);
       border-radius: 5px;
     }
 
     #live-feed-talkgroup-list::-webkit-scrollbar-thumb {
       background-color: var(--primary-color);
       border-radius: 5px;
-      border: 2px solid rgba(0, 0, 0, 0.3);
+      border: 2px solid rgba(var(--panel-rgb), 0.3);
     }
 
     #live-feed-talkgroup-list {
       scrollbar-width: thin;
-      scrollbar-color: var(--primary-color) rgba(0, 0, 0, 0.3);
+      scrollbar-color: var(--primary-color) rgba(var(--panel-rgb), 0.3);
     }
 
     .live-feed-tg-item {
@@ -356,7 +359,7 @@
     }
 
     .live-feed-tg-item:hover {
-        background-color: rgba(0, 51, 0, 0.2);
+        background-color: rgba(var(--hover-rgb), 0.2);
     }
 
     .live-feed-tg-item input[type="checkbox"] {
@@ -379,42 +382,45 @@
 
     /* Google Places Autocomplete Styling */
     .pac-container {
-      background-color: #000 !important;
-      border: 1px solid #00ff00 !important;
+      background-color: var(--background-color) !important;
+      border: 1px solid var(--primary-color) !important;
       border-radius: 4px !important;
-      box-shadow: 0 0 10px rgba(0, 255, 0, 0.3) !important;
-      font-family: 'Share Tech Mono', monospace !important;
+      box-shadow: 0 0 10px rgba(var(--primary-rgb), 0.3) !important;
+      font-family: var(--font-family) !important;
     }
 
     .pac-item {
-      background-color: #000 !important;
-      color: #00ff00 !important;
+      background-color: var(--background-color) !important;
+      color: var(--primary-color) !important;
       border: none !important;
       padding: 8px 12px !important;
       cursor: pointer !important;
     }
 
     .pac-item:hover {
-      background-color: rgba(0, 255, 0, 0.1) !important;
+      background-color: rgba(var(--primary-rgb), 0.1) !important;
     }
 
     .pac-item-selected {
-      background-color: rgba(0, 255, 0, 0.2) !important;
+      background-color: rgba(var(--primary-rgb), 0.2) !important;
     }
 
     .pac-item-query {
-      color: #00ff00 !important;
+      color: var(--primary-color) !important;
       font-weight: bold !important;
     }
 
     .pac-matched {
-      color: #00ccff !important;
+      color: var(--accent-color) !important;
     }
 
     .pac-icon {
       filter: invert(1) hue-rotate(120deg) brightness(1.5) !important;
     }
   </style>
+
+  <!-- Themes load last so their rules win over the base styles -->
+  <link rel="stylesheet" href="themes.css" />
 </head>
 
 <body>
@@ -479,6 +485,9 @@
       <div class="user-management-dropdown">
         <button id="user-menu-btn" class="cyberpunk-button">Settings</button>
         <div id="user-menu-content" class="dropdown-content">
+          <label class="theme-picker-row">Theme
+            <select id="theme-select" data-theme-picker aria-label="Theme"></select>
+          </label>
           <a href="/settings" target="_blank" rel="noopener">⚙️ Settings &amp; Health</a>
           <a href="/settings#users" target="_blank" rel="noopener">👤 Users</a>
           <a href="/settings#sessions" target="_blank" rel="noopener">🔐 Sessions</a>

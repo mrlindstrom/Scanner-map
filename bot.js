@@ -1,6 +1,8 @@
 // bot.js - Main Discord bot application with integrated webserver and initialization
 
 require('dotenv').config();
+// Direct console.* output (startup checks, geocoding) uses the shared log layout
+require('./src/consoleFormat').patchConsole('bot');
 
 // Get environment variables first, before any usage
 const {
@@ -60,21 +62,8 @@ const {
   // --- NEW: Two-Tone Detection Env Vars ---
   ENABLE_TWO_TONE_MODE = 'false',
   TWO_TONE_TALK_GROUPS: twoToneTalkGroupsString,
-  TWO_TONE_QUEUE_SIZE,
-  TONE_DETECTION_TYPE,
-  TWO_TONE_MIN_TONE_LENGTH,
-  TWO_TONE_MAX_TONE_LENGTH,
-  PULSED_MIN_CYCLES,
-  PULSED_MIN_ON_MS,
-  PULSED_MAX_ON_MS,
-  PULSED_MIN_OFF_MS,
-  PULSED_MAX_OFF_MS,
-  PULSED_BANDWIDTH_HZ,
-  LONG_TONE_MIN_LENGTH,
-  LONG_TONE_BANDWIDTH_HZ,
-  TONE_DETECTION_THRESHOLD,
-  TONE_FREQUENCY_BAND,
-  TONE_TIME_RESOLUTION_MS
+  TWO_TONE_QUEUE_SIZE
+  // Tone tuning vars (TONE_*, TWO_TONE_*, PULSED_*, LONG_TONE_*) are read by tone_detect.py
 } = process.env;
 
 // --- VALIDATE AI-RELATED ENV VARS ---
@@ -127,10 +116,14 @@ if (effectiveTranscriptionMode === 'icad' && !ICAD_URL) {
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const bcrypt = require('bcryptjs');
 const { createStorage, isDbMode, buildKey } = require('./src/storage');
+const pendingUploads = require('./src/storage/pendingUploads');
 const { runMigrations } = require('./src/db/migrations');
 const { audioUrl: buildAudioUrl } = require('./src/utils/publicUrl');
+const audioPreprocess = require('./src/transcription/audioPreprocess');
+const hallucinationFilter = require('./src/transcription/hallucinationFilter');
 const { v4: uuidv4 } = require('uuid');
 const busboy = require('busboy');
 const sqlite3 = require('sqlite3').verbose();
@@ -138,6 +131,8 @@ const { spawn } = require('child_process');
 const { Readable } = require('stream');
 const fetch = require('node-fetch');
 const winston = require('winston');
+const { getFileTransports } = require('./src/logger');
+const { consoleFormat, VERBOSE: CONSOLE_SHOW_ALL_INFO } = require('./src/consoleFormat');
 const moment = require('moment-timezone');
 const TALK_GROUPS = {};
 const readline = require('readline');
@@ -213,23 +208,6 @@ if (ENABLE_TWO_TONE_MODE && ENABLE_TWO_TONE_MODE.toLowerCase() === 'true') {
     process.exit(1);
   }
 }
-
-const TWO_TONE_CONFIG = {
-  detectionType: TONE_DETECTION_TYPE,
-  minToneLength: parseFloat(TWO_TONE_MIN_TONE_LENGTH),
-  maxToneLength: parseFloat(TWO_TONE_MAX_TONE_LENGTH),
-  pulsedMinCycles: parseInt(PULSED_MIN_CYCLES, 10),
-  pulsedMinOnMs: parseInt(PULSED_MIN_ON_MS, 10),
-  pulsedMaxOnMs: parseInt(PULSED_MAX_ON_MS, 10),
-  pulsedMinOffMs: parseInt(PULSED_MIN_OFF_MS, 10),
-  pulsedMaxOffMs: parseInt(PULSED_MAX_OFF_MS, 10),
-  pulsedBandwidthHz: parseInt(PULSED_BANDWIDTH_HZ, 10),
-  longToneMinLength: parseFloat(LONG_TONE_MIN_LENGTH),
-  longToneBandwidthHz: parseInt(LONG_TONE_BANDWIDTH_HZ, 10),
-  detectionThreshold: parseFloat(TONE_DETECTION_THRESHOLD),
-  frequencyBand: TONE_FREQUENCY_BAND,
-  timeResolutionMs: parseInt(TONE_TIME_RESOLUTION_MS, 10)
-};
 
 // Parse MAX_CONCURRENT_TRANSCRIPTIONS from env or use default
 const parsedMaxConcurrent = parseInt(MAX_CONCURRENT_TRANSCRIPTIONS, 10);
@@ -308,6 +286,28 @@ function shouldCheckForAddress(talkGroupID, transcriptionId, systemName) {
   return shouldCheck;
 }
 
+// One-line summary of a tone hit from tone_detect.py (icad-tone-detection result dicts)
+function describeTone(tone) {
+  const secs = (v) => (Number.isFinite(parseFloat(v)) ? `${parseFloat(v).toFixed(1)}s` : '?s');
+  if (tone.type === 'hi-low' && Array.isArray(tone.detected)) {
+    // Warble: two alternating tones
+    return `warble ${Math.round(tone.detected[0])}/${Math.round(tone.detected[1])}Hz (${secs(tone.length)}, ${tone.alternations} alternations)`;
+  }
+  if (Array.isArray(tone.detected)) {
+    // Two-tone sequence [A, B]
+    return `${Math.round(tone.detected[0])}Hz (${secs(tone.tone_a_length)}) + ${Math.round(tone.detected[1])}Hz (${secs(tone.tone_b_length)})`;
+  }
+  if (tone.tone_a && tone.tone_b) {
+    return `${tone.tone_a.toFixed(1)}Hz + ${tone.tone_b.toFixed(1)}Hz`;
+  }
+  const freq = tone.detected ?? tone.frequency;
+  if (freq) {
+    // Long or pulsed single tone
+    return `${Math.round(freq)}Hz (${secs(tone.length)})${tone.cycles ? `, ${tone.cycles} pulses` : ''}`;
+  }
+  return null;
+}
+
 function handleToneDetectionResult(hasTwoTone, detectedTones, transcriptionId, talkGroupID, detectedType = 'unknown') {
   if (hasTwoTone) {
     lastTwoToneTime = Date.now();
@@ -354,33 +354,13 @@ function handleToneDetectionResult(hasTwoTone, detectedTones, transcriptionId, t
       // Build comprehensive tone details including all detected tones
       const toneDetailsList = [];
       
-      detectedTones.forEach((tone, index) => {
-        if (tone.tone_a && tone.tone_b) {
-          // Two-tone sequence with separate fields
-          toneDetailsList.push(`${tone.tone_a?.toFixed(1)}Hz + ${tone.tone_b?.toFixed(1)}Hz`);
-        } else if (tone.detected) {
-          // Handle both single tones and two-tone arrays
-          if (Array.isArray(tone.detected)) {
-            // Two-tone sequence with array format [freq1, freq2]
-            const freq1 = Math.round(tone.detected[0]);
-            const freq2 = Math.round(tone.detected[1]);
-            const length1 = tone.tone_a_length ? `${tone.tone_a_length.toFixed(1)}s` : '';
-            const length2 = tone.tone_b_length ? `${tone.tone_b_length.toFixed(1)}s` : '';
-            toneDetailsList.push(`${freq1}Hz (${length1}) + ${freq2}Hz (${length2})`);
-          } else {
-            // Single frequency (long tone)
-            const length = tone.length ? `${tone.length.toFixed(1)}s` : '';
-            toneDetailsList.push(`${Math.round(tone.detected)}Hz (${length})`);
-          }
-        } else if (tone.frequency) {
-          // Alternative frequency field
-          const length = tone.length ? `${tone.length.toFixed(1)}s` : '';
-          toneDetailsList.push(`${tone.frequency?.toFixed(1)}Hz (${length})`);
-        }
+      detectedTones.forEach((tone) => {
+        const description = describeTone(tone);
+        if (description) toneDetailsList.push(description);
       });
       
       if (toneDetailsList.length > 0) {
-        toneDetails = ` TONE_DETAILS[${detectedType}: ${toneDetailsList.join(' | ')}]TONE_DETAILS`;
+        toneDetails = ` [${detectedType}: ${toneDetailsList.join(' | ')}]`;
       }
     }
     
@@ -389,24 +369,7 @@ function handleToneDetectionResult(hasTwoTone, detectedTones, transcriptionId, t
     // Log additional detected tone frequencies if any
     if (detectedTones && detectedTones.length > 0) {
       detectedTones.forEach((tone, index) => {
-        if (tone.tone_a && tone.tone_b) {
-          logger.info(`  Tone ${index + 1}: ${tone.tone_a?.toFixed(1)}Hz → ${tone.tone_b?.toFixed(1)}Hz`);
-        } else if (tone.detected) {
-          // Handle both single tones and two-tone arrays
-          if (Array.isArray(tone.detected)) {
-            // Two-tone sequence with array format [freq1, freq2]
-            const freq1 = tone.detected[0]?.toFixed(1);
-            const freq2 = tone.detected[1]?.toFixed(1);
-            const length1 = tone.tone_a_length ? `${tone.tone_a_length.toFixed(1)}s` : '';
-            const length2 = tone.tone_b_length ? `${tone.tone_b_length.toFixed(1)}s` : '';
-            logger.info(`  Tone ${index + 1}: ${freq1}Hz (${length1}) → ${freq2}Hz (${length2})`);
-          } else {
-            // Single frequency (long tone)
-            logger.info(`  Tone ${index + 1}: ${tone.detected?.toFixed(1)}Hz (${tone.length?.toFixed(1)}s)`);
-          }
-        } else if (tone.frequency) {
-          logger.info(`  Pulse ${index + 1}: ${tone.frequency?.toFixed(1)}Hz`);
-        }
+        logger.info(`  Tone ${index + 1}: ${describeTone(tone) || JSON.stringify(tone)}`);
       });
     }
   } else {
@@ -524,8 +487,14 @@ function detectTwoToneStandalone(audioFilePath, transcriptionId, talkGroupID, ca
   
   logger.info(`Starting standalone tone detection for ID ${transcriptionId}`);
   
-  // Create the Python command to run tone detection
-  const pythonCommand = PYTHON_COMMAND || 'python';
+  // Same interpreter resolution as the transcription worker: an explicit
+  // PYTHON_COMMAND wins, otherwise prefer the project .venv over bare 'python'.
+  let pythonCommand = PYTHON_COMMAND || 'python';
+  const isBareDefault = !PYTHON_COMMAND || /^python(3(\.\d+)?)?$/i.test(String(PYTHON_COMMAND).trim());
+  if (isBareDefault) {
+    const { venvPython } = require('./src/setup/pythonEnv');
+    if (fs.existsSync(venvPython())) pythonCommand = venvPython();
+  }
   
   logger.info(`Using Python command: ${pythonCommand}`);
   logger.info(`Running: ${pythonCommand} tone_detect.py "${audioFilePath}"`);
@@ -534,24 +503,10 @@ function detectTwoToneStandalone(audioFilePath, transcriptionId, talkGroupID, ca
     audioFilePath
   ];
   
-  // Set environment variables for the Python process
-  const env = {
-    ...process.env,
-    TONE_DETECTION_TYPE: TWO_TONE_CONFIG.detectionType,
-    TWO_TONE_MIN_TONE_LENGTH: TWO_TONE_CONFIG.minToneLength.toString(),
-    TWO_TONE_MAX_TONE_LENGTH: TWO_TONE_CONFIG.maxToneLength.toString(),
-    PULSED_MIN_CYCLES: TWO_TONE_CONFIG.pulsedMinCycles.toString(),
-    PULSED_MIN_ON_MS: TWO_TONE_CONFIG.pulsedMinOnMs.toString(),
-    PULSED_MAX_ON_MS: TWO_TONE_CONFIG.pulsedMaxOnMs.toString(),
-    PULSED_MIN_OFF_MS: TWO_TONE_CONFIG.pulsedMinOffMs.toString(),
-    PULSED_MAX_OFF_MS: TWO_TONE_CONFIG.pulsedMaxOffMs.toString(),
-    PULSED_BANDWIDTH_HZ: TWO_TONE_CONFIG.pulsedBandwidthHz.toString(),
-    LONG_TONE_MIN_LENGTH: TWO_TONE_CONFIG.longToneMinLength.toString(),
-    LONG_TONE_BANDWIDTH_HZ: TWO_TONE_CONFIG.longToneBandwidthHz.toString(),
-    TONE_DETECTION_THRESHOLD: TWO_TONE_CONFIG.detectionThreshold.toString(),
-    TONE_FREQUENCY_BAND: TWO_TONE_CONFIG.frequencyBand,
-    TONE_TIME_RESOLUTION_MS: TWO_TONE_CONFIG.timeResolutionMs.toString()
-  };
+  // The child inherits process.env, so tone_detect.py reads the TONE_*,
+  // TWO_TONE_*, PULSED_* and LONG_TONE_* settings directly. (Re-exporting the
+  // parsed values here turned unset numbers into the string "NaN".)
+  const env = { ...process.env };
   
   try {
     const toneProcess = spawn(pythonCommand, toneArgs, {
@@ -577,21 +532,10 @@ function detectTwoToneStandalone(audioFilePath, transcriptionId, talkGroupID, ca
           const result = JSON.parse(output);
           const hasTwoTone = result.has_two_tone || false;
           
-          // Extract tones from the CLI output JSON
-          let detectedTones = [];
-          let detectedType = result.detected_type || 'unknown';
-          if (result.detection_result && result.detection_result.cli_output) {
-            try {
-              const cliResult = JSON.parse(result.detection_result.cli_output);
-              // Combine all detected tone types into one array
-              detectedTones = [
-                ...(cliResult.long_tone || []),
-                ...(cliResult.two_tone || []),
-                ...(cliResult.pulsed || [])
-              ];
-            } catch (cliParseError) {
-              logger.warn(`Error parsing CLI output: ${cliParseError.message}`);
-            }
+          const detectedTones = Array.isArray(result.detected_tones) ? result.detected_tones : [];
+          const detectedType = result.detected_type || 'unknown';
+          if (result.error) {
+            logger.warn(`Tone detection reported an error for ID ${transcriptionId}: ${result.error}`);
           }
           
           logger.info(`Standalone tone detection result for ID ${transcriptionId}: ${hasTwoTone} (${detectedTones.length} tones)`);
@@ -658,29 +602,12 @@ function handleLocalToneDetectionResult(result) {
     
     // Log detected tone frequencies
     detectedTones.forEach((tone, index) => {
-      if (tone.tone_a && tone.tone_b) {
-        logger.info(`  Tone ${index + 1}: ${tone.tone_a?.toFixed(1)}Hz → ${tone.tone_b?.toFixed(1)}Hz`);
-      } else if (tone.detected) {
-        // Handle both single tones and two-tone arrays
-        if (Array.isArray(tone.detected)) {
-          // Two-tone sequence with array format [freq1, freq2]
-          const freq1 = tone.detected[0]?.toFixed(1);
-          const freq2 = tone.detected[1]?.toFixed(1);
-          const length1 = tone.tone_a_length ? `${tone.tone_a_length.toFixed(1)}s` : '';
-          const length2 = tone.tone_b_length ? `${tone.tone_b_length.toFixed(1)}s` : '';
-          logger.info(`  Tone ${index + 1}: ${freq1}Hz (${length1}) → ${freq2}Hz (${length2})`);
-        } else {
-          // Single frequency (long tone)
-          logger.info(`  Tone ${index + 1}: ${tone.detected?.toFixed(1)}Hz (${tone.length?.toFixed(1)}s)`);
-        }
-      } else if (tone.frequency) {
-        logger.info(`  Pulse ${index + 1}: ${tone.frequency?.toFixed(1)}Hz`);
-      }
+      logger.info(`  Tone ${index + 1}: ${describeTone(tone) || JSON.stringify(tone)}`);
     });
   }
   
   if (callback) {
-    callback(hasTwoTone, detectedTones);
+    callback(hasTwoTone, detectedTones, result.detected_type || 'unknown');
   }
 }
 
@@ -740,21 +667,6 @@ const allowedPatterns = [
 
 ];
 
-// Custom Winston format to filter INFO messages based on allowedPatterns
-const infoFilter = winston.format((info, opts) => {
-  // Only filter 'info' level messages
-  if (info.level === 'info') {
-    // Check if the message matches any allowed pattern
-    const allow = opts.allowedPatterns.some(pattern => pattern.test(info.message));
-    // If it doesn't match any pattern, filter it out by returning false
-    if (!allow) {
-      return false;
-    }
-  }
-  // If it's not 'info' level OR it matched a pattern, pass it through
-  return info;
-});
-
 // Logger setup
 const logger = winston.createLogger({
   level: 'info', // Log info and above to files
@@ -768,94 +680,18 @@ const logger = winston.createLogger({
     winston.format.json() // Log to files as JSON
   ),
   transports: [
-    // File transports log everything (info and above) as JSON
-    new winston.transports.File({
-        filename: 'error.log',
-        level: 'error', // Only errors
-        format: winston.format.json()
-    }),
-    new winston.transports.File({
-        filename: 'combined.log', // Info, warn, error
-        format: winston.format.json()
-     }),
+    // Daily-rotated JSON files in ./logs (see src/logger.js, LOG_RETENTION_DAYS)
+    ...getFileTransports(),
 
-    // Console transport has special filtering and coloring
+    // Console: shared layout (src/consoleFormat.js); INFO lines only when they
+    // match allowedPatterns, or when logged with { console: true }
     new winston.transports.Console({
-      level: 'info', // Process info and above for the console
-      format: winston.format.combine(
-        // 1. Add timestamp
-        winston.format.timestamp({
-          format: () => moment().tz(TIMEZONE).format('MM/DD/YYYY HH:mm:ss.SSS')
-        }),
-        // 2. Apply the custom info whitelist filter *for console only*
-        infoFilter({ allowedPatterns }), // Pass the patterns here
-        // 3. Apply coloring/printf format
-        winston.format.printf(({ timestamp, level, message, ...meta }) => {
-            let color = '\x1b[37m'; // Default white
-            let formattedMessage = message;
-
-            // Apply colors based on level first
-             if (level === 'error') {
-               color = '\x1b[31m'; // Red
-             } else if (level === 'warn') {
-               color = '\x1b[33m'; // Yellow
-             } else if (level === 'debug') { // Debug messages will still be colored if level is set lower
-               color = '\x1b[36m'; // Cyan
-             }
-
-            // Apply specific content colors (if message is a string)
-            if (typeof message === 'string') {
-                if (message.includes('Talk Group:') || message.includes('Incoming Request')) {
-                    color = '\x1b[33m'; // Yellow overrides level color
-                } else if (message.includes('Extracted Address') || message.includes('Geocoded Address')) {
-                    color = '\x1b[32m'; // Green overrides level color
-                } else if (message.includes('Dispatch tone detected on TG')) {
-                    // Special handling for tone detection messages with blue details
-                    if (message.includes('TONE_DETAILS')) {
-                        // Split the message at the tone details markers
-                        const parts = message.split('TONE_DETAILS');
-                        if (parts.length === 3) {
-                            // parts[0] = "Dispatch tone detected on TG 4005! "
-                            // parts[1] = "[long: 436Hz, 1.0s]"  
-                            // parts[2] = " Next 1 calls..."
-                            formattedMessage = `\x1b[33m${parts[0]}\x1b[34m${parts[1]}\x1b[33m${parts[2]}\x1b[0m`;
-                            color = ''; // Don't apply additional color since we handle it inline
-                        } else {
-                            color = '\x1b[33m'; // Yellow fallback
-                        }
-                    } else {
-                        color = '\x1b[33m'; // Yellow for tone detection alerts without details
-                    }
-                }
-
-                // Handle Transcription Text coloring separately
-                const transcriptionPrefix = 'Transcription Text:';
-                if (message.startsWith(transcriptionPrefix)) {
-                    const actualText = message.substring(transcriptionPrefix.length).trim();
-                    
-                    // Check if the text has the new format with talker alias: (alias) text
-                    const aliasMatch = actualText.match(/^\(([^)]+)\)\s+(.+)$/);
-                    if (aliasMatch) {
-                        const [, alias, transcriptionText] = aliasMatch;
-                        // Format: Timestamp [LEVEL] Prefix (Default Color) (Red Alias) (Cyan Text)
-                        formattedMessage = `\x1b[37m${transcriptionPrefix}\x1b[0m (\x1b[31m${alias}\x1b[0m) \x1b[36m${transcriptionText}\x1b[0m`;
-                    } else {
-                        // Fallback for old format without alias
-                        formattedMessage = `\x1b[37m${transcriptionPrefix}\x1b[0m \x1b[36m${actualText}\x1b[0m`;
-                    }
-                    // Return directly without applying default level color to the whole line
-                     return `${timestamp} [${level.toUpperCase()}] ${formattedMessage}`;
-                }
-            }
-
-            // Fallback for other messages that passed the filter
-            // If it's an error object, stringify it
-            if (typeof formattedMessage !== 'string') {
-                 formattedMessage = JSON.stringify(formattedMessage);
-            }
-            return `${timestamp} ${color}[${level.toUpperCase()}]\x1b[0m ${color}${formattedMessage}\x1b[0m`;
-        })
-      ) // End of combine for Console
+      level: 'info',
+      format: consoleFormat({
+        source: 'bot',
+        filter: (info) => info.level !== 'info' || CONSOLE_SHOW_ALL_INFO ||
+          allowedPatterns.some((pattern) => pattern.test(info.message)),
+      }),
     })
   ]
 });
@@ -1242,6 +1078,7 @@ const {
   AudioPlayerStatus,
   VoiceConnectionStatus,
   StreamType,
+  NoSubscriberBehavior,
   entersState,
 } = require('@discordjs/voice');
 const prism = require('prism-media');
@@ -2421,7 +2258,15 @@ async function startTranscriptionProcess() {
                           errorMsg.includes('Using device');
        
        if (isImportant) {
-         logger.warn(`Local transcription process: ${errorMsg}`);
+         // Python's logging lines are "<time> [LEVEL] message"; keep their level
+         // instead of reporting every stderr chunk as a warning.
+         for (const line of errorMsg.split(/\r?\n/).filter(Boolean)) {
+           const m = line.match(/^\S+ \S+ \[(\w+)\] (.*)$/);
+           const pyLevel = m ? m[1].toLowerCase() : '';
+           const level = /error|critical|traceback|exception/i.test(pyLevel || line) ? 'error'
+             : /warn/i.test(pyLevel || line) ? 'warn' : 'info';
+           logger.log({ level, message: m ? m[2] : line, source: 'whisper', console: true });
+         }
        }
        
        // Check for specific Python errors that indicate critical issues
@@ -2987,6 +2832,40 @@ async function transcribeWithICADAPI(filePath, callback) {
   }
 }
 
+// --- Transcription quality pipeline (adapted from RadioTranscriber) ---
+// Configured via AUDIO_PREPROCESS_* and TRANSCRIPT_FILTER_* in .env.
+const AUDIO_PREPROCESS_CONFIG = audioPreprocess.loadConfig();
+const TRANSCRIPT_FILTER_CONFIG = hallucinationFilter.loadConfig();
+
+// Send a file to the API-based transcription modes (local mode queues its own payload).
+function transcribeByMode(audioPath, callback) {
+  if (effectiveTranscriptionMode === 'openai') {
+    transcribeWithOpenAIAPI(audioPath, callback);
+  } else if (effectiveTranscriptionMode === 'remote') {
+    transcribeAudioRemotely(audioPath, callback);
+  } else if (effectiveTranscriptionMode === 'icad') {
+    transcribeWithICADAPI(audioPath, callback);
+  } else {
+    transcribeAudio(audioPath, callback);
+  }
+}
+
+// Clean up the audio, run `transcribeFn(audioPath, wasPreprocessed, done)`,
+// then strip hallucinations before handing the text to `callback`.
+async function runTranscriptionPipeline(sourcePath, knownDurationSec, callback, transcribeFn) {
+  const pre = await audioPreprocess.preprocessAudio(sourcePath, AUDIO_PREPROCESS_CONFIG);
+  const durationSec = pre ? pre.durationSec : knownDurationSec;
+
+  transcribeFn(pre ? pre.path : sourcePath, !!pre, (text) => {
+    if (pre) pre.cleanup();
+    const { text: cleaned, reason } = hallucinationFilter.filterTranscript(text, durationSec, TRANSCRIPT_FILTER_CONFIG);
+    if (reason) {
+      logger.info(`Transcript filter (${reason}) on ${path.basename(sourcePath)}: "${text}" -> "${cleaned}"`);
+    }
+    callback(cleaned);
+  });
+}
+
 // Function to handle new audio (routes to local or remote transcription)
 // Normalize a radio system label so it matches consistently between incoming
 // calls (fields.systemLabel) and imported talkgroups (talk_groups.system).
@@ -3107,7 +2986,12 @@ function handleNewAudio(audioData) {
 
     // --- Start DB Operations ---
     // Storage object key / local relative path (same value for all backends).
-    const storagePath = filename;
+    // Date/hour-partitioned (YYYY/MM/DD/HH/) so object-store backends don't pile
+    // every recording into the bucket root, where their list/scanner/heal passes
+    // degrade. Reads always resolve the key from the DB (storage_key /
+    // audio_file_path), so pre-existing flat keys keep working unchanged.
+    const keyDate = Number(dateTime) > 0 ? new Date(Number(dateTime) * 1000) : new Date();
+    const storagePath = buildKey(filename, keyDate);
     logger.debug(`[Storage] key for new call: ${storagePath}`);
 
     // Insert initial record into transcriptions table
@@ -3171,7 +3055,9 @@ function handleNewAudio(audioData) {
               /* logger.warn(`[MERGED CHECK] No srcList available for ID ${transcriptionId}, skipping merged call detection`); */
             }
             
-            const merged = (isTrunkRecorder || hasSrcList) && isMergedCall(srcList);
+            // MERGED_CALL_SPLIT=false transcribes multi-speaker calls as one piece
+            // (srcList positions don't line up exactly with the recorded audio)
+            const merged = MERGED_CALL_SPLIT && (isTrunkRecorder || hasSrcList) && isMergedCall(srcList);
             logger.info(`[MERGED CHECK] Result for ID ${transcriptionId}: merged=${merged}`);
             
             if (merged) {
@@ -3195,9 +3081,11 @@ function handleNewAudio(audioData) {
                 
                 // Split the audio file
                 splitAudioFile(audioPathForSplitting, segmentDefinitions, async (segmentsWithAudio) => {
-                  if (segmentsWithAudio.length === 0) {
-                    logger.error(`Failed to split audio for merged call ${transcriptionId}, falling back to normal processing`);
-                    // Fall through to normal processing - will be handled below
+                  if (segmentsWithAudio.length < 2) {
+                    // Nothing worth splitting (e.g. the only other source keyed up after the audio ended)
+                    logger.warn(`Merged call ${transcriptionId} has ${segmentsWithAudio.length} usable segment(s); transcribing the whole call instead`);
+                    segmentsWithAudio.forEach((seg) => fs.unlink(seg.audioPath, () => {}));
+                    processWholeCall();
                     return;
                   }
                   
@@ -3213,6 +3101,7 @@ function handleNewAudio(audioData) {
                     // Transcribe this segment
                     const segmentCallback = (segmentTranscription) => {
                       completedTranscriptions++;
+                      fs.unlink(segment.audioPath, () => {}); // transcription finished with this file
                       
                       if (segmentTranscription) {
                         segmentTranscriptions.push({
@@ -3239,26 +3128,9 @@ function handleNewAudio(audioData) {
                     };
                     
                     // Transcribe based on mode (use the same mode as the main call)
-                    const segmentTranscriptionMode = effectiveTranscriptionMode || 'local';
-                    if (segmentTranscriptionMode === 'openai') {
-                      transcribeWithOpenAIAPI(segment.audioPath, segmentCallback);
-                    } else if (segmentTranscriptionMode === 'remote') {
-                      transcribeAudioRemotely(segment.audioPath, segmentCallback);
-                    } else if (segmentTranscriptionMode === 'icad') {
-                      transcribeWithICADAPI(segment.audioPath, segmentCallback);
-                    } else {
-                      // Local mode
-                      transcribeAudio(segment.audioPath, segmentCallback);
-                    }
-                    
-                    // Clean up temp segment file after a delay (give transcription time to read it)
-                    setTimeout(() => {
-                      if (fs.existsSync(segment.audioPath)) {
-                        fs.unlink(segment.audioPath, (err) => {
-                          if (err) logger.warn(`Error deleting temp segment file ${segment.audioPath}: ${err.message}`);
-                        });
-                      }
-                    }, 30000); // 30 second delay
+                    const segmentDuration = (segment.endPos || 0) - (segment.startPos || 0);
+                    runTranscriptionPipeline(segment.audioPath, segmentDuration, segmentCallback,
+                      (audioPath, _wasPreprocessed, done) => transcribeByMode(audioPath, done));
                   });
                 });
                 
@@ -3266,212 +3138,214 @@ function handleNewAudio(audioData) {
               }
             }
             
-            // Normal processing for non-merged calls (or fallback)
-            // Define the common callback for processing transcription results
-            const processingCallback = async (transcriptionText) => {
-                if (!transcriptionText) {
-                  // Check if this might be a tone file by looking at the talk group
-                  const possibleToneFile = IS_TWO_TONE_MODE_ENABLED && TWO_TONE_TALK_GROUPS.includes(talkGroupID);
-                  const warningMsg = possibleToneFile ? 
-                    `No transcription obtained for ID ${transcriptionId} (${filename}) - likely tone file or too short` :
-                    `No transcription obtained for ID ${transcriptionId} (${filename}) - file too short or no speech`;
+            // Normal (whole-call) processing. A function declaration so the merged-call
+            // path can fall back to it when splitting yields fewer than two usable segments.
+            function processWholeCall() {
+              // Define the common callback for processing transcription results
+              const processingCallback = async (transcriptionText) => {
+                  if (!transcriptionText) {
+                    // Check if this might be a tone file by looking at the talk group
+                    const possibleToneFile = IS_TWO_TONE_MODE_ENABLED && TWO_TONE_TALK_GROUPS.includes(talkGroupID);
+                    const warningMsg = possibleToneFile ? 
+                      `No transcription obtained for ID ${transcriptionId} (${filename}) - likely tone file or too short` :
+                      `No transcription obtained for ID ${transcriptionId} (${filename}) - file too short or no speech`;
                   
-                  logger.warn(warningMsg);
-                  updateTranscription(transcriptionId, "", async () => {
-                    logger.info(`Updated DB with empty transcription for ID ${transcriptionId}`);
+                    logger.warn(warningMsg);
+                    updateTranscription(transcriptionId, "", async () => {
+                      logger.info(`Updated DB with empty transcription for ID ${transcriptionId}`);
                     
-                    // *** IMPORTANT: Check for two-tone even with empty transcription ***
-                    // Tone files might contain only tones without voice content
-                    if (IS_TWO_TONE_MODE_ENABLED && TWO_TONE_TALK_GROUPS.includes(talkGroupID)) {
-                      logger.info(`Checking for two-tone in talk group ${talkGroupID} (ID: ${transcriptionId}) - empty transcription`);
+                      // *** IMPORTANT: Check for two-tone even with empty transcription ***
+                      // Tone files might contain only tones without voice content
+                      if (IS_TWO_TONE_MODE_ENABLED && TWO_TONE_TALK_GROUPS.includes(talkGroupID)) {
+                        logger.info(`Checking for two-tone in talk group ${talkGroupID} (ID: ${transcriptionId}) - empty transcription`);
                       
-                      // Use a local audio path for tone detection (works for all
-                      // storage backends because the temp file is still present).
-                      const audioPathForTones = finalPathIfLocal || tempPath;
+                        // Use a local audio path for tone detection (works for all
+                        // storage backends because the temp file is still present).
+                        const audioPathForTones = finalPathIfLocal || tempPath;
                       
-                      // Wait for tone detection to complete before continuing
-                      await new Promise((resolve) => {
-                        detectTwoToneQueued(audioPathForTones, transcriptionId, talkGroupID, (hasTwoTone, detectedTones, detectedType) => {
-                          handleToneDetectionResult(hasTwoTone, detectedTones, transcriptionId, talkGroupID, detectedType);
-                          resolve();
+                        // Wait for tone detection to complete before continuing
+                        await new Promise((resolve) => {
+                          detectTwoToneQueued(audioPathForTones, transcriptionId, talkGroupID, (hasTwoTone, detectedTones, detectedType) => {
+                            handleToneDetectionResult(hasTwoTone, detectedTones, transcriptionId, talkGroupID, detectedType);
+                            resolve();
+                          });
                         });
-                      });
                       
-                      logger.info(`Tone detection completed for ID ${transcriptionId} (empty transcription)`);
-                    }
+                        logger.info(`Tone detection completed for ID ${transcriptionId} (empty transcription)`);
+                      }
                     
+                      // Clean up temp file for non-local storage (local already moved it)
+                      if (STORAGE_DEFERS_TEMP_CLEANUP) {
+                        // Use setImmediate to avoid file handle race conditions
+                        setImmediate(() => {
+                           fs.unlink(tempPath, (errUnlink) => {
+                             if (errUnlink && errUnlink.code !== 'ENOENT') {
+                               logger.error(`Error deleting temp file (after empty transcription) ${tempPath}:`, errUnlink);
+                             } else if (!errUnlink) {
+                               logger.info(`Deleted temp file (after empty transcription): ${path.basename(tempPath)}`);
+                             }
+                           });
+                        });
+                      }
+                    });
+                    return;
+                  }
+
+                  // Format talker alias for display - use talkerAlias if available, otherwise use source, fallback to talkgroup
+                  const displayAlias = talkerAlias || (source && source !== 'Unknown' ? `Unit-${source}` : `TG-${talkGroupID}`);
+                  logCallHeader(talkGroupID, talkGroupName, transcriptionId);
+                  logger.info(`Transcription Text: (${displayAlias}) ${transcriptionText}`);
+                  // We got transcription text, update the database
+                  updateTranscription(transcriptionId, transcriptionText, async () => {
+                    logger.info(`Updated DB transcription for ID ${transcriptionId}`);
+
+                    // Now handle the logic that uses the transcription - WAIT for it to complete
+                    await handleNewTranscription(
+                      transcriptionId, transcriptionText, talkGroupID, systemName,
+                      talkGroupName, source, talkerAlias, talkGroupGroup, storagePath, // Pass storagePath
+                      totalErrors, totalSpikes, // <-- Pass error/spike counts
+                      emergency, priority, encrypted, call_length, // <-- Pass call metadata
+                      freq_error, signalQuality, // <-- Pass signal quality
+                      frequency, start_time, stop_time, // <-- Pass timing/frequency
+                      tdma_slot, phase2_tdma, color_code // <-- Pass TDMA/color code
+                    );
+
                     // Clean up temp file for non-local storage (local already moved it)
                     if (STORAGE_DEFERS_TEMP_CLEANUP) {
                       // Use setImmediate to avoid file handle race conditions
                       setImmediate(() => {
-                         fs.unlink(tempPath, (errUnlink) => {
+                        fs.unlink(tempPath, (errUnlink) => {
                            if (errUnlink && errUnlink.code !== 'ENOENT') {
-                             logger.error(`Error deleting temp file (after empty transcription) ${tempPath}:`, errUnlink);
+                             logger.error(`Error deleting temp file (after successful transcription) ${tempPath}:`, errUnlink);
                            } else if (!errUnlink) {
-                             logger.info(`Deleted temp file (after empty transcription): ${path.basename(tempPath)}`);
+                             logger.info(`Deleted temp file (after successful transcription): ${path.basename(tempPath)}`);
                            }
-                         });
+                        });
                       });
                     }
+                    logger.info(`Successfully processed: ${filename}`);
                   });
+              };
+              // --- End common callback definition ---
+
+              // --- Transcription whitelist/blacklist gate ---
+              // Lets TrunkRecorder users (who can't pre-filter what they upload)
+              // skip transcribing noisy/irrelevant talkgroups. The call record and
+              // audio are still stored; we just don't run AI transcription on it.
+              if (!shouldTranscribe(talkGroupID, systemName)) {
+                logger.info(`Skipping transcription for ID ${transcriptionId} (TG ${talkGroupID}${systemName ? '/' + systemName : ''}) per TRANSCRIBE_MODE=${TRANSCRIBE_MODE_VALUE}`);
+                processingCallback('');
+                return;
+              }
+
+              // --- Choose transcription method based on mode ---
+              logger.info(`Initiating transcription for ID ${transcriptionId} using mode: ${effectiveTranscriptionMode}`);
+
+              // Audio cleanup + hallucination filtering wrap every mode.
+              const sourceAudioPath = finalPathIfLocal || tempPath;
+              runTranscriptionPipeline(sourceAudioPath, parseFloat(call_length), processingCallback, (audioPath, wasPreprocessed, done) => {
+                if (effectiveTranscriptionMode !== 'local') {
+                  transcribeByMode(audioPath, done);
                   return;
                 }
 
-                // Format talker alias for display - use talkerAlias if available, otherwise use source, fallback to talkgroup
-                const displayAlias = talkerAlias || (source && source !== 'Unknown' ? `Unit-${source}` : `TG-${talkGroupID}`);
-                logger.info(`Transcription Text: (${displayAlias}) ${transcriptionText}`);
-                // We got transcription text, update the database
-                updateTranscription(transcriptionId, transcriptionText, async () => {
-                  logger.info(`Updated DB transcription for ID ${transcriptionId}`);
+                // 'local' transcription mode
+                  const localRequestId = uuidv4();
+                  let payload;
 
-                  // Now handle the logic that uses the transcription - WAIT for it to complete
-                  await handleNewTranscription(
-                    transcriptionId, transcriptionText, talkGroupID, systemName,
-                    talkGroupName, source, talkerAlias, talkGroupGroup, storagePath, // Pass storagePath
-                    totalErrors, totalSpikes, // <-- Pass error/spike counts
-                    emergency, priority, encrypted, call_length, // <-- Pass call metadata
-                    freq_error, signalQuality, // <-- Pass signal quality
-                    frequency, start_time, stop_time, // <-- Pass timing/frequency
-                    tdma_slot, phase2_tdma, color_code // <-- Pass TDMA/color code
-                  );
-
-                  // Clean up temp file for non-local storage (local already moved it)
-                  if (STORAGE_DEFERS_TEMP_CLEANUP) {
-                    // Use setImmediate to avoid file handle race conditions
-                    setImmediate(() => {
-                      fs.unlink(tempPath, (errUnlink) => {
-                         if (errUnlink && errUnlink.code !== 'ENOENT') {
-                           logger.error(`Error deleting temp file (after successful transcription) ${tempPath}:`, errUnlink);
-                         } else if (!errUnlink) {
-                           logger.info(`Deleted temp file (after successful transcription): ${path.basename(tempPath)}`);
-                         }
-                      });
-                    });
-                  }
-                  logger.info(`Successfully processed: ${filename}`);
-                });
-            };
-            // --- End common callback definition ---
-
-            // --- Transcription whitelist/blacklist gate ---
-            // Lets TrunkRecorder users (who can't pre-filter what they upload)
-            // skip transcribing noisy/irrelevant talkgroups. The call record and
-            // audio are still stored; we just don't run AI transcription on it.
-            if (!shouldTranscribe(talkGroupID, systemName)) {
-              logger.info(`Skipping transcription for ID ${transcriptionId} (TG ${talkGroupID}${systemName ? '/' + systemName : ''}) per TRANSCRIBE_MODE=${TRANSCRIBE_MODE_VALUE}`);
-              processingCallback('');
-              return;
-            }
-
-            // --- Choose transcription method based on mode ---
-            logger.info(`Initiating transcription for ID ${transcriptionId} using mode: ${effectiveTranscriptionMode}`);
-
-            if (effectiveTranscriptionMode === 'openai') {
-                // OpenAI API transcription mode
-                const pathToUse = STORAGE_IS_LOCAL ? finalPathIfLocal : tempPath;
-                transcribeWithOpenAIAPI(pathToUse, processingCallback);
-            } else if (effectiveTranscriptionMode === 'remote') {
-                // Use the remote function for faster-whisper server
-                const pathToUseForRemote = STORAGE_IS_LOCAL ? finalPathIfLocal : tempPath;
-                transcribeAudioRemotely(pathToUseForRemote, processingCallback);
-            } else if (effectiveTranscriptionMode === 'icad') {
-                // ICAD API transcription mode (OpenAI-compatible interface)
-                const pathToUse = STORAGE_IS_LOCAL ? finalPathIfLocal : tempPath;
-                transcribeWithICADAPI(pathToUse, processingCallback);
-            } else { // 'local' transcription mode
-                const localRequestId = uuidv4();
-                let payload;
-
-                if (STORAGE_DEFERS_TEMP_CLEANUP) {
-                    // Remote object storage / DB blob + Local Transcription: Send buffer
-                    logger.info(`Queueing local transcription (ID: ${localRequestId}) for DB ID ${transcriptionId} using BASE64 BUFFER`);
+                  if (STORAGE_DEFERS_TEMP_CLEANUP && !wasPreprocessed) {
+                      // Remote object storage / DB blob + Local Transcription: Send buffer
+                      logger.info(`Queueing local transcription (ID: ${localRequestId}) for DB ID ${transcriptionId} using BASE64 BUFFER`);
                     
-                    // Check buffer size before encoding to prevent memory issues
-                    const bufferSizeMB = fileBuffer.length / (1024 * 1024);
-                    if (bufferSizeMB > 45) { // Leave some headroom under the 50MB limit
-                      logger.error(`Audio buffer too large for local transcription: ${bufferSizeMB.toFixed(2)}MB. Failing transcription for ID ${transcriptionId}.`);
-                      processingCallback(""); // Fail the transcription
-                      return;
-                    }
+                      // Check buffer size before encoding to prevent memory issues
+                      const bufferSizeMB = fileBuffer.length / (1024 * 1024);
+                      if (bufferSizeMB > 45) { // Leave some headroom under the 50MB limit
+                        logger.error(`Audio buffer too large for local transcription: ${bufferSizeMB.toFixed(2)}MB. Failing transcription for ID ${transcriptionId}.`);
+                        done(""); // Fail the transcription
+                        return;
+                      }
                     
-                    payload = {
-                        command: 'transcribe',
-                        id: localRequestId,
-                        audio_data_base64: fileBuffer.toString('base64') // Send the buffer directly
-                    };
-                    // NOTE: tempPath will be deleted later in processingCallback
-                } else {
-                    // Local Storage + Local Transcription: Send path
-                    // Use the final path if available, otherwise use tempPath for local mode
-                    const pathToUse = finalPathIfLocal || tempPath;
+                      payload = {
+                          command: 'transcribe',
+                          id: localRequestId,
+                          audio_data_base64: fileBuffer.toString('base64') // Send the buffer directly
+                      };
+                      // NOTE: tempPath will be deleted later in processingCallback
+                  } else {
+                      // Local Storage (or preprocessed audio) + Local Transcription: Send path
+                      // Preprocessed WAV if cleanup ran, otherwise the stored/temp file
+                      const pathToUse = audioPath;
                     
-                    // Double-check file exists before queuing (race condition protection)
-                    if (!fs.existsSync(pathToUse)) {
-                         logger.error(`Local audio file ${pathToUse} missing before queuing for local transcription (ID ${transcriptionId}). Aborting.`);
-                         processingCallback(""); // Fail the transcription
-                         return; // Don't queue
-                    }
+                      // Double-check file exists before queuing (race condition protection)
+                      if (!fs.existsSync(pathToUse)) {
+                           logger.error(`Local audio file ${pathToUse} missing before queuing for local transcription (ID ${transcriptionId}). Aborting.`);
+                           done(""); // Fail the transcription
+                           return; // Don't queue
+                      }
                     
-                    // Verify file is readable
-                    try {
-                      fs.accessSync(pathToUse, fs.constants.R_OK);
-                    } catch (accessError) {
-                      logger.error(`Local audio file ${pathToUse} not readable before queuing: ${accessError.message}`);
-                      processingCallback(""); // Fail the transcription
-                      return;
-                    }
-                    
-                    logger.info(`Queueing local transcription (ID: ${localRequestId}) for DB ID ${transcriptionId} using PATH: ${pathToUse}`);
-                    payload = {
-                        command: 'transcribe',
-                        id: localRequestId,
-                        path: pathToUse // Send the final path or temp path
-                    };
-                }
-
-                // Check if queue is getting too large (high-volume protection)
-                if (transcriptionQueue.length >= MAX_QUEUE_SIZE) {
-                  logger.error(`Transcription queue full (${MAX_QUEUE_SIZE} items). Dropping oldest items to prevent memory issues.`);
-                  
-                  // Remove oldest items beyond threshold, keeping newer ones
-                  const itemsToRemove = transcriptionQueue.length - PRIORITY_QUEUE_THRESHOLD;
-                  for (let i = 0; i < itemsToRemove; i++) {
-                    const droppedItem = transcriptionQueue.shift();
-                    if (droppedItem && droppedItem.callback) {
+                      // Verify file is readable
                       try {
-                        droppedItem.callback(""); // Fail the dropped transcription
-                        logger.warn(`Dropped transcription ID ${droppedItem.dbTranscriptionId} due to queue overflow`);
-                      } catch (callbackError) {
-                        logger.error(`Error executing callback for dropped item: ${callbackError.message}`);
+                        fs.accessSync(pathToUse, fs.constants.R_OK);
+                      } catch (accessError) {
+                        logger.error(`Local audio file ${pathToUse} not readable before queuing: ${accessError.message}`);
+                        done(""); // Fail the transcription
+                        return;
+                      }
+                    
+                      logger.info(`Queueing local transcription (ID: ${localRequestId}) for DB ID ${transcriptionId} using PATH: ${pathToUse}`);
+                      payload = {
+                          command: 'transcribe',
+                          id: localRequestId,
+                          path: pathToUse // Send the final path or temp path
+                      };
+                  }
+
+                  // Check if queue is getting too large (high-volume protection)
+                  if (transcriptionQueue.length >= MAX_QUEUE_SIZE) {
+                    logger.error(`Transcription queue full (${MAX_QUEUE_SIZE} items). Dropping oldest items to prevent memory issues.`);
+                  
+                    // Remove oldest items beyond threshold, keeping newer ones
+                    const itemsToRemove = transcriptionQueue.length - PRIORITY_QUEUE_THRESHOLD;
+                    for (let i = 0; i < itemsToRemove; i++) {
+                      const droppedItem = transcriptionQueue.shift();
+                      if (droppedItem && droppedItem.callback) {
+                        try {
+                          droppedItem.callback(""); // Fail the dropped transcription
+                          logger.warn(`Dropped transcription ID ${droppedItem.dbTranscriptionId} due to queue overflow`);
+                        } catch (callbackError) {
+                          logger.error(`Error executing callback for dropped item: ${callbackError.message}`);
+                        }
                       }
                     }
                   }
-                }
 
-                // Add the job with its specific payload to the queue
-                const queueItem = {
-                   id: localRequestId, // ID for matching response from Python
-                   payload: payload, // Contains either path or base64 data
-                   callback: processingCallback,
-                   dbTranscriptionId: transcriptionId,
-                   queuedAt: Date.now(), // Track when item was queued for debugging
-                   priority: Date.now() // Use timestamp as priority (newer = higher priority for busy systems)
-                };
+                  // Add the job with its specific payload to the queue
+                  const queueItem = {
+                     id: localRequestId, // ID for matching response from Python
+                     payload: payload, // Contains either path or base64 data
+                     callback: done,
+                     dbTranscriptionId: transcriptionId,
+                     queuedAt: Date.now(), // Track when item was queued for debugging
+                     priority: Date.now() // Use timestamp as priority (newer = higher priority for busy systems)
+                  };
                 
-                // For very busy systems, add to front if queue is large (prioritize recent calls)
-                if (transcriptionQueue.length > PRIORITY_QUEUE_THRESHOLD) {
-                  transcriptionQueue.unshift(queueItem); // Add to front
-                  logger.info(`HIGH VOLUME: Added transcription to front of queue (current size: ${transcriptionQueue.length})`);
-                } else {
-                  transcriptionQueue.push(queueItem); // Normal operation
-                }
+                  // For very busy systems, add to front if queue is large (prioritize recent calls)
+                  if (transcriptionQueue.length > PRIORITY_QUEUE_THRESHOLD) {
+                    transcriptionQueue.unshift(queueItem); // Add to front
+                    logger.info(`HIGH VOLUME: Added transcription to front of queue (current size: ${transcriptionQueue.length})`);
+                  } else {
+                    transcriptionQueue.push(queueItem); // Normal operation
+                  }
                 
-                // Use setImmediate to avoid potential race conditions in queue processing
-                setImmediate(() => {
-                  processNextTranscription(); // Trigger the local queue processor
-                });
+                  // Use setImmediate to avoid potential race conditions in queue processing
+                  setImmediate(() => {
+                    processNextTranscription(); // Trigger the local queue processor
+                  });
+              });
+              // --- End mode choice ---
             }
-            // --- End mode choice ---
+
+            processWholeCall();
         };
         // --- End afterStorageComplete function definition ---
 
@@ -3484,6 +3358,33 @@ function handleNewAudio(audioData) {
         } else {
           const ext = path.extname(storagePath).toLowerCase();
           const contentType = ext === '.m4a' ? 'audio/mp4' : 'audio/mpeg';
+          if (!STORAGE_IS_LOCAL) {
+            // Remote object storage: retry, then park the file locally for the
+            // re-upload job (pendingUploads.flushPending) instead of dropping the
+            // call. The temp file stays as transcription input either way.
+            pendingUploads.saveWithFallback(storage, storagePath, fileBuffer, contentType)
+              .then((result) => {
+                if (result.location === 'remote') {
+                  db.run('UPDATE transcriptions SET storage_key = ?, storage_mode = ? WHERE id = ?',
+                    [storagePath, storage.type, transcriptionId], () => {});
+                  logger.info(`Stored audio for ID ${transcriptionId} in ${storage.type}: ${storagePath}`);
+                } else if (result.location === 'pending') {
+                  db.run('UPDATE transcriptions SET storage_key = ?, storage_mode = ? WHERE id = ?',
+                    [storagePath, pendingUploads.PENDING_MODE, transcriptionId], () => {});
+                  logger.warn(`${storage.type} unavailable for ID ${transcriptionId}; audio saved locally and will be re-uploaded`);
+                } else {
+                  db.run('UPDATE transcriptions SET storage_key = NULL, audio_file_path = NULL WHERE id = ?',
+                    [transcriptionId], () => {});
+                  logger.error(`Audio for ID ${transcriptionId} could not be stored anywhere; keeping the call and transcript without audio`);
+                }
+                afterStorageComplete(null);
+              })
+              .catch((storeErr) => {
+                logger.error(`Unexpected storage error for ID ${transcriptionId}: ${storeErr.message}; transcribing anyway`);
+                afterStorageComplete(null);
+              });
+          } else {
+          // Local disk storage
           storage
             .save(storagePath, fileBuffer, contentType)
             .then(() => {
@@ -3513,6 +3414,7 @@ function handleNewAudio(audioData) {
               db.run('DELETE FROM transcriptions WHERE id = ?', [transcriptionId], () => {});
               fs.unlink(tempPath, () => {});
             });
+          }
         }
         // --- End Storage Handling ---
 
@@ -3583,7 +3485,26 @@ const AUDIO_RETENTION_DAYS = parseInt(process.env.AUDIO_RETENTION_DAYS, 10);
 const RETENTION_DAYS = Number.isFinite(AUDIO_RETENTION_DAYS) ? AUDIO_RETENTION_DAYS : 30;
 
 // Function to cleanup old audio files (DB blobs AND objects in the storage backend)
+// Remove merged-call segment files a crash or restart left behind (normally
+// deleted as soon as their transcription finishes).
+function cleanupStaleSegmentFiles() {
+  try {
+    const staleBefore = Date.now() - 60 * 60 * 1000;
+    let removed = 0;
+    for (const name of fs.readdirSync(UPLOAD_DIR)) {
+      if (!name.startsWith('segment_')) continue;
+      const file = path.join(UPLOAD_DIR, name);
+      if (fs.statSync(file).mtimeMs < staleBefore) { fs.unlinkSync(file); removed++; }
+    }
+    if (removed) logger.info(`Removed ${removed} stale merged-call segment files`);
+  } catch (e) {
+    logger.warn(`Segment file cleanup failed: ${e.message}`);
+  }
+}
+
 function cleanupOldAudioFiles() {
+  cleanupStaleSegmentFiles();
+
   // Always prune the legacy listen-live blobs after 7 days.
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
   db.run(`DELETE FROM audio_files WHERE created_at < ?`, [sevenDaysAgo], (err) => {
@@ -3592,34 +3513,98 @@ function cleanupOldAudioFiles() {
   });
 
   // Prune stored audio objects/files older than the retention window.
+  //
+  // Batched loop rather than a single fixed LIMIT: a backlog (ingest rate
+  // higher than one run clears, or a period where the job didn't run) is
+  // actually drained instead of falling permanently behind. Both key columns
+  // are cleared after a confirmed delete so pruned rows aren't re-selected on
+  // every subsequent run.
   if (RETENTION_DAYS > 0 && storage) {
     const cutoffSec = Math.floor((Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000) / 1000);
-    db.all(
-      `SELECT id, storage_key, audio_file_path FROM transcriptions WHERE timestamp < ? AND (storage_key IS NOT NULL OR audio_file_path IS NOT NULL) LIMIT 5000`,
-      [cutoffSec],
-      async (err, rows) => {
-        if (err) { logger.error(`Retention query failed: ${err.message}`); return; }
-        if (!rows || !rows.length) return;
-        let removed = 0;
-        for (const row of rows) {
-          const key = row.storage_key || row.audio_file_path;
-          if (!key) continue;
-          try {
-            await storage.delete(key);
-            db.run('UPDATE transcriptions SET storage_key = NULL WHERE id = ?', [row.id], () => {});
-            removed += 1;
-          } catch (e) {
-            logger.warn(`Retention: could not delete ${key}: ${e.message}`);
-          }
-        }
-        if (removed) logger.info(`Retention: removed ${removed} audio objects older than ${RETENTION_DAYS} days.`);
+    const RETENTION_BATCH = 1000;
+    const RETENTION_MAX_BATCHES = 1000; // safety cap: <= 1M objects per run
+    let totalRemoved = 0;
+
+    const runRetentionBatch = (batchNum) => {
+      if (batchNum >= RETENTION_MAX_BATCHES) {
+        logger.warn(`Retention: reached batch cap (${RETENTION_MAX_BATCHES}); removed ${totalRemoved} this run, remainder deferred to next run.`);
+        return;
       }
-    );
+      db.all(
+        `SELECT id, storage_key, audio_file_path FROM transcriptions
+           WHERE timestamp < ? AND (storage_key IS NOT NULL OR audio_file_path IS NOT NULL)
+           LIMIT ?`,
+        [cutoffSec, RETENTION_BATCH],
+        async (err, rows) => {
+          if (err) { logger.error(`Retention query failed: ${err.message}`); return; }
+          if (!rows || !rows.length) {
+            if (totalRemoved) logger.info(`Retention: removed ${totalRemoved} audio objects older than ${RETENTION_DAYS} days.`);
+            return;
+          }
+          let removedThisBatch = 0;
+          for (const row of rows) {
+            const key = row.storage_key || row.audio_file_path;
+            if (!key) continue;
+            try {
+              await storage.delete(key);
+            } catch (e) {
+              logger.warn(`Retention: could not delete ${key}: ${e.message}`);
+              continue; // leave the row for a later retry
+            }
+            db.run('UPDATE transcriptions SET storage_key = NULL, audio_file_path = NULL WHERE id = ?', [row.id], () => {});
+            removedThisBatch += 1;
+            totalRemoved += 1;
+          }
+          if (removedThisBatch === 0) {
+            logger.warn(`Retention: batch of ${rows.length} made no progress (all deletes failed/skipped); stopping this run.`);
+            if (totalRemoved) logger.info(`Retention: removed ${totalRemoved} audio objects older than ${RETENTION_DAYS} days.`);
+            return;
+          }
+          setImmediate(() => runRetentionBatch(batchNum + 1));
+        }
+      );
+    };
+
+    runRetentionBatch(0);
   }
 }
 
 // Run cleanup every day
 setInterval(cleanupOldAudioFiles, 24 * 60 * 60 * 1000);
+cleanupStaleSegmentFiles(); // also clear leftovers from before this start
+
+// --- Re-upload audio parked locally while remote storage was unreachable ---
+// Calls whose upload failed were saved under STORAGE_FALLBACK_DIR with
+// storage_mode='pending'. This job uploads them, marks them as stored, and
+// deletes the local copies (or just deletes them if the call is gone).
+const PENDING_UPLOAD_INTERVAL_MS = Math.max(1, parseInt(process.env.STORAGE_RETRY_INTERVAL_MIN, 10) || 5) * 60 * 1000;
+
+async function runPendingUploadJob() {
+  if (!storage || STORAGE_IS_LOCAL) return;
+  try {
+    const stats = await pendingUploads.flushPending(storage, {
+      // Row still waiting for this file? (null = call deleted/purged, drop the copy)
+      getRow: (key) => new Promise((resolve, reject) => db.get(
+        'SELECT id FROM transcriptions WHERE storage_key = ? AND storage_mode = ?',
+        [key, pendingUploads.PENDING_MODE],
+        (err, row) => (err ? reject(err) : resolve(row || null)))),
+      markUploaded: (key) => new Promise((resolve, reject) => db.run(
+        'UPDATE transcriptions SET storage_mode = ? WHERE storage_key = ? AND storage_mode = ?',
+        [storage.type, key, pendingUploads.PENDING_MODE],
+        (err) => (err ? reject(err) : resolve()))),
+    });
+    if (!stats || !(stats.uploaded || stats.removed || stats.failed)) return;
+    const summary = `Pending uploads: ${stats.uploaded} re-uploaded to ${storage.type}, ${stats.removed} orphaned copies removed, ` +
+      `${stats.failed} failed, ${stats.remaining} still waiting`;
+    if (stats.failed && !stats.uploaded) logger.warn(summary);
+    else logger.log({ level: 'info', message: summary, console: true });
+  } catch (err) {
+    logger.error(`Pending upload job failed: ${err.message}`);
+  }
+}
+
+setInterval(runPendingUploadJob, PENDING_UPLOAD_INTERVAL_MS);
+setTimeout(runPendingUploadJob, 60 * 1000); // first pass shortly after startup
 
 // Function to transcribe audio
 function transcribeAudio(filePath, callback) {
@@ -3886,6 +3871,15 @@ function getAudioDuration(audioFilePath, callback) {
   });
 }
 
+// Merged-call speaker segments shorter than this are dropped (key-ups, kerchunks)
+// Split multi-speaker (merged) calls per speaker; false = transcribe the whole recording at once
+const MERGED_CALL_SPLIT = String(process.env.MERGED_CALL_SPLIT || 'true').toLowerCase() !== 'false';
+
+const MERGED_CALL_MIN_SEGMENT_SEC = (() => {
+  const v = parseFloat(process.env.MERGED_CALL_MIN_SEGMENT_SEC);
+  return Number.isFinite(v) && v >= 0 ? v : 0.5;
+})();
+
 // Function to split audio file into segments using ffmpeg
 function splitAudioFile(audioFilePath, segments, callback) {
   if (!segments || segments.length === 0) {
@@ -3896,7 +3890,11 @@ function splitAudioFile(audioFilePath, segments, callback) {
   const { spawn } = require('child_process');
   const tempSegments = [];
   let completedSegments = 0;
-  let hasError = false;
+  // Every segment (created, skipped or failed) counts once; report when all are done.
+  const segmentDone = () => {
+    completedSegments++;
+    if (completedSegments === segments.length) callback(tempSegments);
+  };
   
   // First, get the audio file duration to fix the last segment's endPos if needed
   getAudioDuration(audioFilePath, (err, audioDuration) => {
@@ -3913,16 +3911,16 @@ function splitAudioFile(audioFilePath, segments, callback) {
         endTime = audioDuration;
         logger.info(`Adjusting last segment endPos from ${segment.endPos} to ${audioDuration} (actual audio duration)`);
       }
+      // srcList positions (and the 5s estimate for entries without len) can run past
+      // the recording; ffmpeg's copy mode then writes a header-only file with no audio.
+      if (audioDuration && endTime > audioDuration) endTime = audioDuration;
       
       const duration = endTime - startTime;
       
-      // Skip segments with invalid duration
-      if (duration <= 0) {
-        logger.warn(`Skipping segment ${index} (${segment.sourceDisplay}): invalid duration ${duration}s (start: ${startTime}, end: ${endTime})`);
-        completedSegments++;
-        if (completedSegments === segments.length && !hasError) {
-          callback(tempSegments);
-        }
+      // Skip segments that are empty or too short to transcribe
+      if (duration < MERGED_CALL_MIN_SEGMENT_SEC) {
+        logger.info(`Skipping segment ${index} (${segment.sourceDisplay}): ${duration.toFixed(2)}s is under ${MERGED_CALL_MIN_SEGMENT_SEC}s (start: ${startTime}, end: ${endTime}, audio: ${audioDuration || '?'}s)`);
+        segmentDone();
         return;
       }
       
@@ -3940,11 +3938,17 @@ function splitAudioFile(audioFilePath, segments, callback) {
       ];
       
       const ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
+      // 'error' and 'close' can both fire when spawning fails; count the segment once
+      let counted = false;
+      const finishSegment = () => { if (!counted) { counted = true; segmentDone(); } };
       
       ffmpegProcess.on('close', (code) => {
-        completedSegments++;
-        
-        if (code === 0 && fs.existsSync(tempSegmentPath)) {
+        // Copy mode can exit 0 yet write a header-only file; real AAC audio is well over 1 KB
+        const segmentBytes = fs.existsSync(tempSegmentPath) ? fs.statSync(tempSegmentPath).size : 0;
+        if (code === 0 && segmentBytes < 1000) {
+          logger.warn(`Discarding audio segment ${index} (${segment.sourceDisplay}): output has no audio (${segmentBytes} bytes)`);
+          fs.unlink(tempSegmentPath, () => {});
+        } else if (code === 0 && segmentBytes > 0) {
           tempSegments.push({
             ...segment,
             audioPath: tempSegmentPath
@@ -3952,27 +3956,13 @@ function splitAudioFile(audioFilePath, segments, callback) {
           logger.info(`Created audio segment ${index}: ${segment.sourceDisplay} (${startTime.toFixed(2)}s-${endTime.toFixed(2)}s, ${duration.toFixed(2)}s)`);
         } else {
           logger.warn(`Failed to create audio segment ${index} (${segment.sourceDisplay}): ffmpeg exited with code ${code}`);
-          hasError = true;
         }
-        
-        // When all segments are processed, call callback
-        if (completedSegments === segments.length) {
-          if (!hasError || tempSegments.length > 0) {
-            callback(tempSegments);
-          } else {
-            callback([]);
-          }
-        }
+        finishSegment();
       });
       
       ffmpegProcess.on('error', (error) => {
         logger.error(`Error spawning ffmpeg for segment ${index} (${segment.sourceDisplay}): ${error.message}`);
-        completedSegments++;
-        hasError = true;
-        
-        if (completedSegments === segments.length) {
-          callback(tempSegments.length > 0 ? tempSegments : []);
-        }
+        finishSegment();
       });
       
       // Suppress ffmpeg output
@@ -3983,6 +3973,14 @@ function splitAudioFile(audioFilePath, segments, callback) {
 }
 
 // Function to process merged call segments after transcription
+// Start a call's block in the console: divider + talkgroup header. Logged
+// right before the transcription so address/tone lines that follow sit under it.
+// The call ID matches "Extracted Address for ID ..." when calls overlap.
+function logCallHeader(talkGroupID, talkGroupName, callId) {
+  logger.info('--- Incoming Request ---');
+  logger.info(`Talk Group: ${talkGroupID} - ${talkGroupName || 'Unknown'} (call ${callId})`);
+}
+
 async function processMergedCallSegments(
   transcriptionId,
   segmentTranscriptions,
@@ -4000,6 +3998,14 @@ async function processMergedCallSegments(
   // Sort segments by their start position to ensure correct order
   const sortedSegments = [...segmentTranscriptions].sort((a, b) => (a.startPos || 0) - (b.startPos || 0));
   logger.info(`Sorted ${sortedSegments.length} segments by position for merged call ID ${transcriptionId}`);
+  
+  // Same console block as single-speaker calls: header, then one line per speaker
+  logCallHeader(talkGroupID, talkGroupName, transcriptionId);
+  for (const segment of sortedSegments) {
+    if (segment.transcription && segment.transcription.trim()) {
+      logger.info(`Transcription Text: (${segment.sourceDisplay}) ${segment.transcription.trim()}`);
+    }
+  }
   
   // Combine all transcriptions for the database (full call transcription)
   const fullTranscription = sortedSegments
@@ -4033,6 +4039,13 @@ async function processMergedCallSegments(
   updateTranscription(transcriptionId, fullTranscription, async () => {
     logger.info(`Updated DB transcription for merged call ID ${transcriptionId}`);
     
+    // Same address/tone handling as single-speaker calls, on the combined text and full recording
+    try {
+      await analyzeCall(transcriptionId, fullTranscription, talkGroupID, talkGroupName, systemName, storagePath);
+    } catch (error) {
+      logger.error(`Error analyzing merged call ID ${transcriptionId}: ${error.message}`, { stack: error.stack });
+    }
+    
     // Send ONE message with all segments combined
     // Use the first segment's source for display, but the combined transcription
     const firstSegment = sortedSegments.find(seg => seg.transcription && seg.transcription.trim() !== '');
@@ -4049,7 +4062,7 @@ async function processMergedCallSegments(
     const totalSpikes = sortedSegments.reduce((sum, seg) => sum + (seg.spikes || 0), 0);
     
     // Send as a merged call (use special handling to bypass normal message construction)
-    await sendMergedCallMessage(
+    const mergedMessageUrl = await sendMergedCallMessage(
       talkGroupID,
       talkGroupName,
       combinedTranscription, // Pre-formatted with all segments
@@ -4057,6 +4070,18 @@ async function processMergedCallSegments(
       transcriptionId,
       talkGroupGroup
     );
+    
+    // Keyword alerts on the combined text, attributed to the first speaker with text
+    try {
+      await alertOnKeywords(transcriptionId, fullTranscription, talkGroupID, talkGroupName, systemName,
+        segmentSource, segmentTalkerAlias, mergedMessageUrl || null);
+    } catch (error) {
+      logger.error(`Error checking keywords for merged call ID ${transcriptionId}: ${error.message}`, { stack: error.stack });
+    }
+
+    if (activeVoiceChannels.has(String(talkGroupID))) {
+      playAudioForTalkGroup(talkGroupID, transcriptionId);
+    }
     
     // Clean up temp file for non-local storage (local already moved it)
     if (STORAGE_DEFERS_TEMP_CLEANUP) {
@@ -4073,6 +4098,113 @@ async function processMergedCallSegments(
     
     logger.info(`Successfully processed merged call: ${transcriptionId}`);
   });
+}
+
+// Post-transcription analysis shared by normal and merged (per-speaker) calls:
+// two-tone follow-up queueing, address extraction/geocoding and tone detection.
+// audioFilePath is the storage key / path of the full call recording.
+async function analyzeCall(id, transcriptionText, talkGroupID, talkGroupName, systemName, audioFilePath) {
+  // Auto-queue calls after two-tone detection (if in two-tone mode)
+  if (IS_TWO_TONE_MODE_ENABLED && lastTwoToneTime > 0 && lastDetectedToneGroup) {
+    const timeSinceTwoTone = Date.now() - lastTwoToneTime;
+    const isSameTalkGroup = talkGroupID === lastDetectedToneGroup;
+    const sameTgQueueCount = twoToneQueue.filter(call => call.talkGroupID === talkGroupID).length;
+    
+    const shouldAutoQueue = timeSinceTwoTone < 60000 && // Within 1 minute of two-tone
+                           isSameTalkGroup && // Same talk group as tone detection
+                           sameTgQueueCount < TWO_TONE_QUEUE_SIZE_VALUE; // Queue not full for this TG
+    
+    if (shouldAutoQueue) {
+      logger.info(`Auto-queuing call ID ${id} from TG ${talkGroupID} for address extraction (${timeSinceTwoTone}ms after tone)`);
+      addToTwoToneQueue({
+        id: id,
+        talkGroupID: talkGroupID,
+        talkGroupName: talkGroupName,
+        transcriptionText: transcriptionText
+      });
+    } else if (IS_TWO_TONE_MODE_ENABLED && lastTwoToneTime > 0) {
+      if (!isSameTalkGroup) {
+        logger.info(`Skipping auto-queue for ID ${id}: Different talk group (${talkGroupID} vs ${lastDetectedToneGroup})`);
+      } else if (sameTgQueueCount >= TWO_TONE_QUEUE_SIZE_VALUE) {
+        logger.info(`Skipping auto-queue for ID ${id}: Queue full for TG ${talkGroupID}`);
+      }
+    }
+  }
+
+  // Handle address extraction based on mode
+  if (transcriptionText.length >= 15 && shouldCheckForAddress(talkGroupID, id, systemName)) {
+    await extractAndProcessAddress(id, transcriptionText, talkGroupID, systemName);
+  } else if (transcriptionText.length < 15) {
+    logger.info(`Skipping address extraction for short transcription (ID ${id}): ${transcriptionText.length} characters`);
+  } else if (!IS_TWO_TONE_MODE_ENABLED) {
+    logger.info(`Skipping address extraction for non-whitelisted talk group: ${talkGroupID}`);
+  }
+
+  // Handle two-tone detection if enabled and this is a monitored talk group
+  if (IS_TWO_TONE_MODE_ENABLED && TWO_TONE_TALK_GROUPS.includes(talkGroupID) && audioFilePath) {
+    logger.info(`Checking for two-tone in talk group ${talkGroupID} (ID: ${id})`);
+
+    // Tone detection needs a local file. For local storage use it directly;
+    // for remote object storage, materialize a short-lived temp copy.
+    const localBase = (storage && storage.baseDir) ? storage.baseDir : path.join(__dirname, 'audio');
+    let audioPathForTones = path.join(localBase, audioFilePath);
+    let toneTempToClean = null;
+    let parkedCopy = null;
+    try { parkedCopy = pendingUploads.pendingPath(audioFilePath); } catch (_) { /* invalid key */ }
+    if (!STORAGE_IS_LOCAL && parkedCopy && fs.existsSync(parkedCopy)) {
+      // Upload failed and the audio is parked locally awaiting re-upload
+      audioPathForTones = parkedCopy;
+    } else if (!STORAGE_IS_LOCAL && storage) {
+      try {
+        const buf = await storage.getBuffer(audioFilePath);
+        const tmp = path.join(localBase, `.tone_${id}_${path.basename(audioFilePath)}`);
+        fs.writeFileSync(tmp, buf);
+        audioPathForTones = tmp;
+        toneTempToClean = tmp;
+      } catch (e) {
+        logger.warn(`Could not fetch audio for tone detection (ID ${id}): ${e.message}`);
+      }
+    }
+
+    // Wait for tone detection to complete before continuing
+    await new Promise((resolve) => {
+      detectTwoToneQueued(audioPathForTones, id, talkGroupID, (hasTwoTone, detectedTones, detectedType) => {
+        handleToneDetectionResult(hasTwoTone, detectedTones, id, talkGroupID, detectedType);
+        resolve();
+      });
+    });
+    if (toneTempToClean) fs.unlink(toneTempToClean, () => {});
+
+    logger.info(`Tone detection completed for ID ${id}`);
+  }
+}
+
+// Keyword alerts shared by normal and merged calls; messageUrl links the alert
+// back to the call's Discord message.
+async function alertOnKeywords(id, transcriptionText, talkGroupID, talkGroupName, systemName, source, talkerAlias, messageUrl) {
+  const matchedKeywords = await new Promise((resolve, reject) => {
+    checkForKeywords(talkGroupID, transcriptionText, (keywords) => {
+      if (keywords) resolve(keywords);
+      else reject(new Error('Error checking keywords'));
+    });
+  });
+
+  logger.info(`Matched keywords for ID ${id}: ${matchedKeywords.join(', ') || 'None'}`);
+
+  if (matchedKeywords.length > 0 && alertChannel) {
+    logger.info(`Sending alert message for ID ${id}`);
+    await sendAlertMessage(
+      talkGroupID,
+      talkGroupName,
+      transcriptionText,
+      systemName,
+      source,
+      talkerAlias,
+      id,  // Pass the numeric ID here too
+      matchedKeywords,
+      messageUrl
+    );
+  }
 }
 
 async function handleNewTranscription(
@@ -4102,81 +4234,14 @@ async function handleNewTranscription(
 ) {
   logger.info(`Starting handleNewTranscription for ID ${id}`);
   logger.info(`Transcription text length: ${transcriptionText.length} characters`);
-  logger.info(`Talk Group: ${talkGroupID} - ${talkGroupName}`);
-
-  // Auto-queue calls after two-tone detection (if in two-tone mode)
-  if (IS_TWO_TONE_MODE_ENABLED && lastTwoToneTime > 0 && lastDetectedToneGroup) {
-    const timeSinceTwoTone = Date.now() - lastTwoToneTime;
-    const isSameTalkGroup = talkGroupID === lastDetectedToneGroup;
-    const sameTgQueueCount = twoToneQueue.filter(call => call.talkGroupID === talkGroupID).length;
-    
-    const shouldAutoQueue = timeSinceTwoTone < 60000 && // Within 1 minute of two-tone
-                           isSameTalkGroup && // Same talk group as tone detection
-                           sameTgQueueCount < TWO_TONE_QUEUE_SIZE_VALUE; // Queue not full for this TG
-    
-    if (shouldAutoQueue) {
-      logger.info(`Auto-queuing call ID ${id} from TG ${talkGroupID} for address extraction (${timeSinceTwoTone}ms after tone)`);
-      addToTwoToneQueue({
-        id: id,
-        talkGroupID: talkGroupID,
-        talkGroupName: talkGroupName,
-        transcriptionText: transcriptionText
-      });
-    } else if (IS_TWO_TONE_MODE_ENABLED && lastTwoToneTime > 0) {
-      if (!isSameTalkGroup) {
-        logger.info(`Skipping auto-queue for ID ${id}: Different talk group (${talkGroupID} vs ${lastDetectedToneGroup})`);
-      } else if (sameTgQueueCount >= TWO_TONE_QUEUE_SIZE_VALUE) {
-        logger.info(`Skipping auto-queue for ID ${id}: Queue full for TG ${talkGroupID}`);
-      }
-    }
-  }
 
   const timeout = setTimeout(() => {
     logger.error(`Timeout occurred in handleNewTranscription for ID ${id}`);
   }, 40000); // Increased timeout from 15 to 40 seconds
 
   try {
-    // Handle address extraction based on mode
-    if (transcriptionText.length >= 15 && shouldCheckForAddress(talkGroupID, id, systemName)) {
-      await extractAndProcessAddress(id, transcriptionText, talkGroupID, systemName);
-    } else if (transcriptionText.length < 15) {
-      logger.info(`Skipping address extraction for short transcription (ID ${id}): ${transcriptionText.length} characters`);
-    } else if (!IS_TWO_TONE_MODE_ENABLED) {
-      logger.info(`Skipping address extraction for non-whitelisted talk group: ${talkGroupID}`);
-    }
-
-    // Handle two-tone detection if enabled and this is a monitored talk group
-    if (IS_TWO_TONE_MODE_ENABLED && TWO_TONE_TALK_GROUPS.includes(talkGroupID) && audioFilePath) {
-      logger.info(`Checking for two-tone in talk group ${talkGroupID} (ID: ${id})`);
-
-      // Tone detection needs a local file. For local storage use it directly;
-      // for remote object storage, materialize a short-lived temp copy.
-      const localBase = (storage && storage.baseDir) ? storage.baseDir : path.join(__dirname, 'audio');
-      let audioPathForTones = path.join(localBase, audioFilePath);
-      let toneTempToClean = null;
-      if (!STORAGE_IS_LOCAL && storage) {
-        try {
-          const buf = await storage.getBuffer(audioFilePath);
-          const tmp = path.join(localBase, `.tone_${id}_${path.basename(audioFilePath)}`);
-          fs.writeFileSync(tmp, buf);
-          audioPathForTones = tmp;
-          toneTempToClean = tmp;
-        } catch (e) {
-          logger.warn(`Could not fetch audio for tone detection (ID ${id}): ${e.message}`);
-        }
-      }
-
-      // Wait for tone detection to complete before continuing
-      await new Promise((resolve) => {
-        detectTwoToneQueued(audioPathForTones, id, talkGroupID, (hasTwoTone, detectedTones, detectedType) => {
-          handleToneDetectionResult(hasTwoTone, detectedTones, id, talkGroupID, detectedType);
-          resolve();
-        });
-      });
-      if (toneTempToClean) fs.unlink(toneTempToClean, () => {});
-
-      logger.info(`Tone detection completed for ID ${id}`);
-    }
+    // Two-tone queueing, address extraction and tone detection
+    await analyzeCall(id, transcriptionText, talkGroupID, talkGroupName, systemName, audioFilePath);
 
     // Store the message URL
     let messageUrl = null;
@@ -4216,32 +4281,9 @@ async function handleNewTranscription(
     });
 
     // Check for keywords and send alert with the message URL
-    const matchedKeywords = await new Promise((resolve, reject) => {
-      checkForKeywords(talkGroupID, transcriptionText, (keywords) => {
-        if (keywords) resolve(keywords);
-        else reject(new Error('Error checking keywords'));
-      });
-    });
+    await alertOnKeywords(id, transcriptionText, talkGroupID, talkGroupName, systemName, source, talkerAlias, messageUrl);
 
-    logger.info(`Matched keywords for ID ${id}: ${matchedKeywords.join(', ') || 'None'}`);
-
-    if (matchedKeywords.length > 0 && alertChannel) {
-      logger.info(`Sending alert message for ID ${id}`);
-      await sendAlertMessage(
-        talkGroupID,
-        talkGroupName,
-        transcriptionText,
-        systemName,
-        source,
-        talkerAlias,
-        id,  // Pass the numeric ID here too
-        matchedKeywords,
-        messageUrl
-      );
-    }
-
-    if (activeVoiceChannels.has(talkGroupID)) {
-      logger.info(`Playing audio for talk group ${talkGroupID}`);
+    if (activeVoiceChannels.has(String(talkGroupID))) {
       playAudioForTalkGroup(talkGroupID, id);
     }
 
@@ -5237,7 +5279,8 @@ Include no other text besides this JSON.`;
           body: JSON.stringify({
             model: OLLAMA_MODEL,
             prompt: commonPrompt,
-            stream: false
+            stream: false,
+			options: { num_ctx: 8192 }
           }),
           signal: controller.signal
         });
@@ -5716,135 +5759,122 @@ function getOrCreateChannel(channelName, categoryId, callback) {
 }
 
 // Voice channel and audio playback management
+//
+// "Listen Live" creates a voice channel per talk group; while it exists, each new
+// call on that talk group is queued and played into it. Each talk group gets one
+// connection and one player; the player's listeners are attached once, and going
+// Idle plays the next queued call.
 const activeVoiceChannels = new Map();
-const audioFilesInUse = new Set();
+const VOICE_READY_TIMEOUT_MS = 20000;
+const VOICE_IDLE_CLEANUP_MS = 2 * 60 * 1000;
+const VOICE_TMP_DIR = path.join(os.tmpdir(), 'scanner-map-voice');
 
 function playAudioForTalkGroup(talkGroupID, transcriptionId) {
   talkGroupID = talkGroupID.toString();
   const talkGroupData = activeVoiceChannels.get(talkGroupID);
   if (!talkGroupData || !talkGroupData.player) {
-    logger.error('No active player for talk group:', talkGroupID);
+    logger.warn(`Listen Live: no active player for talk group ${talkGroupID}`);
     return;
-  }
-
-  if (!talkGroupData.queue) {
-    talkGroupData.queue = [];
   }
 
   talkGroupData.queue.push(transcriptionId);
-
-  if (talkGroupData.player.state.status !== AudioPlayerStatus.Playing) {
+  if (talkGroupData.player.state.status === AudioPlayerStatus.Idle && !talkGroupData.loading) {
     processAudioQueue(talkGroupID);
   } else {
-    logger.info(`Added audio to queue for talk group ${talkGroupID}`);
+    logger.info(`Listen Live: queued call ${transcriptionId} for talk group ${talkGroupID} (${talkGroupData.queue.length} waiting)`);
   }
 }
 
-function processAudioQueue(talkGroupID) {
+// Copy a call's audio into a temp file. ffmpeg can't reliably read .m4a from a
+// pipe (the moov atom is usually at the end of the file), so it gets a real file.
+async function fetchCallAudioToTempFile(transcriptionId) {
+  const row = await new Promise((resolve) => {
+    db.get('SELECT storage_key, audio_file_path, storage_mode FROM transcriptions WHERE id = ?',
+      [transcriptionId], (err, r) => resolve(err ? null : r));
+  });
+  const key = row && (row.storage_key || row.audio_file_path);
+  const ext = key && path.extname(key) ? path.extname(key) : '.audio';
+  await fs.promises.mkdir(VOICE_TMP_DIR, { recursive: true });
+  const tmpFile = path.join(VOICE_TMP_DIR, `${transcriptionId}-${Date.now()}${ext}`);
+
+  const writeStream = async (readable) => {
+    await new Promise((resolve, reject) => {
+      const out = fs.createWriteStream(tmpFile);
+      readable.on('error', reject);
+      out.on('error', reject);
+      out.on('finish', resolve);
+      readable.pipe(out);
+    });
+    return tmpFile;
+  };
+
+  if (key && storage) {
+    try {
+      // Saves that hit a storage outage are parked locally until re-uploaded
+      if (row.storage_mode === pendingUploads.PENDING_MODE) {
+        const parked = pendingUploads.pendingPath(key);
+        if (fs.existsSync(parked)) return await writeStream(fs.createReadStream(parked));
+      }
+      const readable = storage.type === 'local'
+        ? storage.createReadStream(key)
+        : await storage.getReadStream(key);
+      return await writeStream(readable);
+    } catch (e) {
+      logger.warn(`Listen Live: storage read failed for call ${transcriptionId} (${e.message}); trying DB copy`);
+    }
+  }
+
+  const blob = await new Promise((resolve) => {
+    db.get('SELECT audio_data FROM audio_files WHERE transcription_id = ?',
+      [transcriptionId], (err, r) => resolve(err || !r ? null : r.audio_data));
+  });
+  if (!blob) return null;
+  await fs.promises.writeFile(tmpFile, Buffer.from(blob));
+  return tmpFile;
+}
+
+async function processAudioQueue(talkGroupID) {
   talkGroupID = talkGroupID.toString();
   const talkGroupData = activeVoiceChannels.get(talkGroupID);
-  if (!talkGroupData || !talkGroupData.player || !talkGroupData.queue) {
-    logger.error('Invalid talk group data while processing queue.');
-    return;
-  }
-
-  if (talkGroupData.queue.length === 0) {
-    logger.info(`Audio queue for talk group ${talkGroupID} is empty.`);
-    return;
-  }
+  if (!talkGroupData || !talkGroupData.player) return;
+  if (talkGroupData.loading || talkGroupData.player.state.status !== AudioPlayerStatus.Idle) return;
 
   const transcriptionId = talkGroupData.queue.shift();
-  logger.info(`Now playing audio for talk group ${talkGroupID}: ${transcriptionId}`);
+  if (transcriptionId === undefined) return;
 
-  // --- NEW: Unified audio playing logic ---
-  const playStream = (inputStream) => {
-    // Common logic to transcode and play a stream
-    const transcoder = new prism.FFmpeg({
-      args: [
-        '-i', 'pipe:0', '-analyzeduration', '0', '-loglevel', '0',
-        '-f', 's16le', '-ar', '48000', '-ac', '2',
-      ],
-    });
-
-    inputStream.pipe(transcoder);
-
-    const resource = createAudioResource(transcoder, {
-      inputType: StreamType.Raw,
-      inlineVolume: true,
-    });
-    
-    resource.volume.setVolume(1.0);
-
-    talkGroupData.player.play(resource);
-    talkGroupData.lastActivity = Date.now();
-    
-    talkGroupData.player.once(AudioPlayerStatus.Idle, () => processAudioQueue(talkGroupID));
-    
-    talkGroupData.player.once('error', (error) => {
-      logger.error(`Player error for talk group ${talkGroupID}:`, error);
-      processAudioQueue(talkGroupID);
-    });
-  };
-
-  // Serve playback audio from the configured storage backend, falling back to
-  // the SQLite blob (legacy/db mode) when no object is available.
-  const playFromDbBlob = () => {
-    db.get('SELECT audio_data FROM audio_files WHERE transcription_id = ?', [transcriptionId], (err, row) => {
-      if (err || !row) {
-        logger.error('Audio data not found in DB for transcription ID:', transcriptionId);
-        processAudioQueue(talkGroupID);
-        return;
-      }
-      const audioBuffer = Buffer.from(row.audio_data);
-      const stream = new Readable();
-      stream.push(audioBuffer);
-      stream.push(null);
-      playStream(stream);
-    });
-  };
-
-  if (storage) {
-    db.get('SELECT storage_key, audio_file_path FROM transcriptions WHERE id = ?', [transcriptionId], async (err, row) => {
-      const key = row && (row.storage_key || row.audio_file_path);
-      if (err || !key) {
-        logger.warn(`No storage key for transcription ID ${transcriptionId}, trying DB blob.`);
-        return playFromDbBlob();
-      }
-      try {
-        const stream = storage.type === 'local'
-          ? storage.createReadStream(key)
-          : await storage.getReadStream(key);
-        stream.on('error', (sErr) => {
-          logger.error(`Error streaming audio for Discord playback (ID ${transcriptionId}): ${sErr.message}. Falling back to DB.`);
-          playFromDbBlob();
-        });
-        playStream(stream);
-      } catch (e) {
-        logger.error(`Storage read failed for Discord playback (ID ${transcriptionId}): ${e.message}. Falling back to DB.`);
-        playFromDbBlob();
-      }
-    });
-  } else {
-    playFromDbBlob();
+  talkGroupData.loading = true;
+  let tmpFile = null;
+  try {
+    tmpFile = await fetchCallAudioToTempFile(transcriptionId);
+  } catch (e) {
+    logger.error(`Listen Live: could not load audio for call ${transcriptionId}: ${e.message}`);
   }
-}
+  talkGroupData.loading = false;
 
+  // The channel may have been torn down while the audio was loading
+  if (activeVoiceChannels.get(talkGroupID) !== talkGroupData) {
+    if (tmpFile) fs.unlink(tmpFile, () => {});
+    return;
+  }
+  if (!tmpFile) {
+    logger.error(`Listen Live: no audio found for call ${transcriptionId}`);
+    return processAudioQueue(talkGroupID);
+  }
 
-function deleteAudioFile(transcriptionId) {
-  db.run('DELETE FROM audio_files WHERE transcription_id = ?', [transcriptionId], (err) => {
-    if (err) {
-      logger.error(`Error deleting audio data for transcription ID ${transcriptionId}:`, err.message);
-    } else {
-      logger.info(`Deleted audio data for transcription ID ${transcriptionId}`);
-    }
+  const transcoder = new prism.FFmpeg({
+    args: ['-analyzeduration', '0', '-loglevel', 'error', '-i', tmpFile,
+      '-f', 's16le', '-ar', '48000', '-ac', '2'],
   });
-}
+  transcoder.on('error', (e) => logger.error(`Listen Live: ffmpeg failed for call ${transcriptionId}: ${e.message}`));
+  transcoder.once('close', () => fs.unlink(tmpFile, () => {}));
 
-function markAudioFileAsNotNeeded(transcriptionId) {
-  audioFilesInUse.delete(transcriptionId);
-  if (!audioFilesInUse.has(transcriptionId)) {
-    deleteAudioFile(transcriptionId);
-  }
+  const resource = createAudioResource(transcoder, {
+    inputType: StreamType.Raw,
+    metadata: { transcriptionId },
+  });
+  talkGroupData.lastActivity = Date.now();
+  talkGroupData.player.play(resource);
+  logger.info(`Listen Live: playing call ${transcriptionId} on talk group ${talkGroupID}`);
 }
 
 async function handleListenLive(interaction, talkGroupID) {
@@ -5854,23 +5884,28 @@ async function handleListenLive(interaction, talkGroupID) {
   const guild = interaction.guild;
   const talkGroupInfo = await getTalkGroupName(talkGroupID);
 
-  let voiceChannel;
-  if (activeVoiceChannels.has(talkGroupID)) {
-    voiceChannel = activeVoiceChannels.get(talkGroupID).voiceChannel;
-  } else {
-    voiceChannel = await getOrCreateVoiceChannel(guild, talkGroupID, talkGroupInfo.name);
-  }
-
+  const voiceChannel = await getOrCreateVoiceChannel(guild, talkGroupID, talkGroupInfo.name);
   if (!voiceChannel) {
     await interaction.editReply('❌ Failed to create or find voice channel.');
     return;
   }
 
-  startStreamingAudio(talkGroupID);
-  monitorVoiceChannel(voiceChannel, talkGroupID);
+  const connection = startStreamingAudio(talkGroupID);
+  try {
+    await entersState(connection, VoiceConnectionStatus.Ready, VOICE_READY_TIMEOUT_MS);
+  } catch (e) {
+    logger.error(`Listen Live: voice connection for talk group ${talkGroupID} never became ready ` +
+      `(state: ${connection ? connection.state.status : 'none'})`);
+    cleanupVoiceChannel(talkGroupID);
+    await interaction.editReply('❌ The bot could not connect to voice. Check that it has Connect and Speak ' +
+      'permissions, then try again.');
+    return;
+  }
 
+  monitorVoiceChannel(talkGroupID);
   await interaction.editReply(
-    `🎧 Please join the voice channel: ${voiceChannel}\nTalk Group: ${talkGroupInfo.name}`
+    `🎧 Please join the voice channel: ${voiceChannel}\nTalk Group: ${talkGroupInfo.name}\n` +
+    'New calls on this talk group will play there as they come in.'
   );
 }
 
@@ -5896,164 +5931,144 @@ function getTalkGroupName(talkGroupID) {
 
 async function getOrCreateVoiceChannel(guild, talkGroupID, talkGroupName) {
   talkGroupID = talkGroupID.toString();
-
   if (activeVoiceChannels.has(talkGroupID)) {
     return activeVoiceChannels.get(talkGroupID).voiceChannel;
-  } else {
-    try {
-      const voiceChannel = await guild.channels.create({
-        name: `🔊 ${talkGroupName}`,
-        type: ChannelType.GuildVoice,
-        permissionOverwrites: [
-          {
-            id: guild.roles.everyone.id,
-            allow: ['ViewChannel', 'Connect', 'Speak'],
-          },
-        ],
-      });
-
-      const player = createAudioPlayer();
-      const connection = joinVoiceChannel({
-        channelId: voiceChannel.id,
-        guildId: guild.id,
-        adapterCreator: guild.voiceAdapterCreator,
-        selfDeaf: false,
-      });
-
-      connection.subscribe(player);
-
-      connection.on(VoiceConnectionStatus.Disconnected, () => {
-        cleanupVoiceChannel(talkGroupID);
-      });
-
-      activeVoiceChannels.set(talkGroupID, {
-        voiceChannel,
-        connection,
-        player,
-        lastActivity: Date.now(),
-        queue: [],
-      });
-
-      return voiceChannel;
-    } catch (err) {
-      logger.error('Error creating voice channel:', err);
-      return null;
-    }
+  }
+  try {
+    const voiceChannel = await guild.channels.create({
+      name: `🔊 ${talkGroupName}`,
+      type: ChannelType.GuildVoice,
+      permissionOverwrites: [
+        {
+          id: guild.roles.everyone.id,
+          allow: ['ViewChannel', 'Connect', 'Speak'],
+        },
+      ],
+    });
+    activeVoiceChannels.set(talkGroupID, {
+      voiceChannel,
+      connection: null,
+      player: null,
+      lastActivity: Date.now(),
+      queue: [],
+      loading: false,
+      monitor: null,
+    });
+    return voiceChannel;
+  } catch (err) {
+    logger.error('Error creating voice channel:', err);
+    return null;
   }
 }
 
+// Join (or rejoin) the talk group's voice channel; returns the connection.
 function startStreamingAudio(talkGroupID) {
   talkGroupID = talkGroupID.toString();
-
   const talkGroupData = activeVoiceChannels.get(talkGroupID);
   if (!talkGroupData) {
     logger.error('No active voice channel data for talk group:', talkGroupID);
-    return;
+    return null;
   }
-
-  if (
-    talkGroupData.connection &&
-    talkGroupData.connection.state.status !== VoiceConnectionStatus.Destroyed
-  ) {
-    return;
+  if (talkGroupData.connection &&
+      talkGroupData.connection.state.status !== VoiceConnectionStatus.Destroyed) {
+    return talkGroupData.connection;
   }
 
   const { voiceChannel } = talkGroupData;
+  const connection = joinVoiceChannel({
+    channelId: voiceChannel.id,
+    guildId: voiceChannel.guild.id,
+    adapterCreator: voiceChannel.guild.voiceAdapterCreator,
+    selfDeaf: true, // the bot only sends audio
+  });
 
-  try {
-    const connection = joinVoiceChannel({
-      channelId: voiceChannel.id,
-      guildId: voiceChannel.guild.id,
-      adapterCreator: voiceChannel.guild.voiceAdapterCreator,
-      selfDeaf: false,
-    });
-
-    const player = createAudioPlayer();
-
-    connection.subscribe(player);
-
-    talkGroupData.connection = connection;
-    talkGroupData.player = player;
-
-    connection.on(VoiceConnectionStatus.Disconnected, async (oldState, newState) => {
-      try {
-        await Promise.race([
-          entersState(connection, VoiceConnectionStatus.Signalling, 5000),
-          entersState(connection, VoiceConnectionStatus.Connecting, 5000),
-        ]);
-      } catch (error) {
-        cleanupVoiceChannel(talkGroupID);
+  if (!talkGroupData.player) {
+    const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } });
+    player.on('stateChange', (oldState, newState) => {
+      if (newState.status === AudioPlayerStatus.Idle && oldState.status !== AudioPlayerStatus.Idle) {
+        processAudioQueue(talkGroupID);
       }
     });
-  } catch (error) {
-    logger.error(`Error starting audio stream for talk group ${talkGroupID}:`, error.message);
+    player.on('error', (error) => {
+      // The player goes Idle after an error, which moves on to the next call
+      const id = error.resource && error.resource.metadata ? error.resource.metadata.transcriptionId : '?';
+      logger.error(`Listen Live: player error on talk group ${talkGroupID} (call ${id}): ${error.message}`);
+    });
+    talkGroupData.player = player;
   }
+  connection.subscribe(talkGroupData.player);
+
+  connection.on('stateChange', (oldState, newState) => {
+    if (oldState.status !== newState.status) {
+      logger.debug(`Listen Live: voice connection ${talkGroupID} ${oldState.status} -> ${newState.status}`);
+    }
+  });
+  connection.on('error', (error) => {
+    logger.error(`Listen Live: voice connection error on talk group ${talkGroupID}: ${error.message}`);
+  });
+  connection.on(VoiceConnectionStatus.Disconnected, async () => {
+    try {
+      // A channel move or region change reconnects on its own; give it a moment
+      await Promise.race([
+        entersState(connection, VoiceConnectionStatus.Signalling, 5000),
+        entersState(connection, VoiceConnectionStatus.Connecting, 5000),
+      ]);
+    } catch (error) {
+      logger.warn(`Listen Live: voice connection for talk group ${talkGroupID} dropped; closing channel`);
+      cleanupVoiceChannel(talkGroupID);
+    }
+  });
+
+  talkGroupData.connection = connection;
+  return connection;
 }
 
-function monitorVoiceChannel(voiceChannel, talkGroupID) {
-  const interval = setInterval(() => {
-    const talkGroupData = activeVoiceChannels.get(talkGroupID);
-    if (!talkGroupData) {
-      clearInterval(interval);
+function monitorVoiceChannel(talkGroupID) {
+  const talkGroupData = activeVoiceChannels.get(talkGroupID);
+  if (!talkGroupData || talkGroupData.monitor) return;
+
+  talkGroupData.monitor = setInterval(() => {
+    const current = activeVoiceChannels.get(talkGroupID);
+    if (current !== talkGroupData) {
+      clearInterval(talkGroupData.monitor);
       return;
     }
-
-    const channelMembers = voiceChannel.members.filter((member) => !member.user.bot);
-
-    if (channelMembers.size === 0) {
-      const timeSinceLastActivity = Date.now() - talkGroupData.lastActivity;
-      if (timeSinceLastActivity >= 2 * 60 * 1000) { // 2 minutes
-        cleanupVoiceChannel(talkGroupID);
-        clearInterval(interval);
-      }
-    } else {
+    const listeners = talkGroupData.voiceChannel.members.filter((member) => !member.user.bot);
+    if (listeners.size > 0) {
       talkGroupData.lastActivity = Date.now();
+    } else if (Date.now() - talkGroupData.lastActivity >= VOICE_IDLE_CLEANUP_MS) {
+      logger.info(`Listen Live: nobody listening on talk group ${talkGroupID}; closing channel`);
+      cleanupVoiceChannel(talkGroupID);
     }
-  }, 30 * 1000); // Check every 30 seconds
+  }, 30 * 1000);
 }
 
 function cleanupVoiceChannel(talkGroupID) {
   talkGroupID = talkGroupID.toString();
-
   const talkGroupData = activeVoiceChannels.get(talkGroupID);
-  if (!talkGroupData) {
-    return;
-  }
+  if (!talkGroupData) return;
+  activeVoiceChannels.delete(talkGroupID);
 
-  const { voiceChannel, connection, player, queue } = talkGroupData;
-
-  if (connection) {
-    try {
-      connection.destroy();
-    } catch (error) {
-      logger.error(`Error destroying connection for talk group ${talkGroupID}:`, error.message);
-    }
-  }
+  const { voiceChannel, connection, player, monitor } = talkGroupData;
+  if (monitor) clearInterval(monitor);
+  talkGroupData.queue.length = 0;
 
   if (player) {
-    try {
-      player.stop();
-    } catch (error) {
+    try { player.stop(true); } catch (error) {
       logger.error(`Error stopping player for talk group ${talkGroupID}:`, error.message);
     }
   }
-
-  if (queue && queue.length > 0) {
-    queue.forEach((transcriptionId) => {
-      markAudioFileAsNotNeeded(transcriptionId);
-    });
+  if (connection && connection.state.status !== VoiceConnectionStatus.Destroyed) {
+    try { connection.destroy(); } catch (error) {
+      logger.error(`Error destroying connection for talk group ${talkGroupID}:`, error.message);
+    }
   }
-
   if (voiceChannel) {
     voiceChannel
       .delete()
-      .then(() => {
-        logger.info(`Deleted voice channel for talk group ${talkGroupID}`);
-      })
+      .then(() => logger.info(`Deleted voice channel for talk group ${talkGroupID}`))
       .catch((err) => logger.error('Error deleting voice channel:', err));
   }
-
-  activeVoiceChannels.delete(talkGroupID);
 }
 
 // Define the slash commands
@@ -6543,7 +6558,7 @@ User Question: ${userQuestion}
                       model: OLLAMA_MODEL,
                       prompt: commonPrompt,
                       stream: false,
-                      options: { num_ctx: 35000 }
+                      options: { num_ctx: 8192 }
                     }),
                     signal: controller.signal
                 });

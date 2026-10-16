@@ -120,7 +120,7 @@ function updateSliderFill(slider) {
         const clampedPercentage = Math.max(0, Math.min(100, percentage));
         
         // Apply gradient style
-        slider.style.background = `linear-gradient(to right, var(--primary-color) ${clampedPercentage}%, rgba(0, 255, 0, 0.1) ${clampedPercentage}%)`;
+        slider.style.background = `linear-gradient(to right, var(--primary-color) ${clampedPercentage}%, rgba(var(--primary-rgb), 0.1) ${clampedPercentage}%)`;
         
         // console.log(`[VOLUME] Updated slider fill to ${clampedPercentage}%`); // REMOVED THIS LINE
     } catch (error) {
@@ -261,7 +261,7 @@ L.Icon.UserLocationPulse = L.DivIcon.extend({
                 width: ${this.options.iconSize[0]}px;
                 height: ${this.options.iconSize[1]}px;
                 border-radius: 50%;
-                box-shadow: 0 0 2px rgba(0,0,0,0.7); /* Sharper shadow for the dot */
+                box-shadow: 0 0 2px rgba(var(--shadow-rgb), 0.7); /* Sharper shadow for the dot */
                 position: relative; /* Needed for :after positioning */
                 display: flex; /* For centering if iconSize was just for container */
                 align-items: center; /* For centering */
@@ -1060,11 +1060,19 @@ function handleNewCall(call) {
                     addPulsingEffectToMarker(call.id);
                     
                     // Only animate to the new marker if tracking is enabled
+                    // Tracked calls wait their turn on the shared audio channel: the map
+                    // only flies to the next call once the previous one finished playing.
                     if (isTrackingNewCalls) {
-                        console.log(`[Track New Call] Tracking enabled. Enqueuing animation for call ID ${call.id}.`);
-                        enqueueAnimation(marker, () => {
-                            console.log(`[Track New Call] Animation completed. Calling handleMarkerVisibility for call ID ${call.id}.`);
-                            handleMarkerVisibility(marker);
+                        console.log(`[Track New Call] Tracking enabled. Queueing call ID ${call.id}.`);
+                        CallAudio.enqueue({
+                            id: call.id,
+                            start: (done) => {
+                                enqueueAnimation(marker, () => playTrackedMarker(marker, call.id, done));
+                                return () => {
+                                    marker.pendingAutoPlay = null; // interrupted before its popup finished loading
+                                    if (wavesurfers[call.id]) wavesurfers[call.id].pause();
+                                };
+                            },
                         });
                     }
                     
@@ -1098,7 +1106,7 @@ function showNewCallBanner(talkGroup, category) {
     categoryBadge.textContent = category;
     categoryBadge.style.cssText = `
       background-color: var(--hover-color);
-      color: #00ccff;
+      color: var(--accent-color);
       padding: 2px 6px;
       border-radius: 10px;
       font-size: 12px;
@@ -1230,8 +1238,17 @@ function addMarker(call, isNew = false) {
             // console.log(`Popup opened for callId: ${call.id}`); // REMOVED THIS LOG
             // --- MODIFIED: Use call.id for audio URL ---
             initWaveSurfer(call.id, `/audio/${call.id}`, wavesurfers, () => { // Pass main wavesurfers object
-                if (!isNewCallAudioMuted && this.shouldPlayAudio) {
-                    playWaveSurferAudio(call.id, wavesurfers, this);
+                const ws = wavesurfers[call.id];
+                if (this.pendingAutoPlay) {
+                    // Tracked call whose turn it is on the shared audio channel
+                    const done = this.pendingAutoPlay;
+                    this.pendingAutoPlay = null;
+                    if (ws) playWaveSurferUntilDone(ws, done, call.id); else done();
+                } else if (!isNewCallAudioMuted && this.shouldPlayAudio && ws) {
+                    // New call the user opened themselves: counts as a manual play
+                    this.shouldPlayAudio = false;
+                    const done = CallAudio.interrupt(call.id, () => ws.pause());
+                    playWaveSurferUntilDone(ws, done, call.id);
                 }
             });
 
@@ -1366,8 +1383,8 @@ function createLocationIQDropdown(inputElement, scope) {
     top: 100%;
     left: 0;
     right: 0;
-    background-color: #000;
-    border: 1px solid #00ff00;
+    background-color: var(--background-color);
+    border: 1px solid var(--primary-color);
     border-top: none;
     border-radius: 0 0 4px 4px;
     max-height: 200px;
@@ -1492,8 +1509,8 @@ function createLocationIQDropdown(inputElement, scope) {
         padding: 8px 12px;
         cursor: pointer;
         border-bottom: 1px solid #333;
-        color: #00ff00;
-        font-family: 'Share Tech Mono', monospace;
+        color: var(--primary-color);
+        font-family: var(--font-family);
         font-size: 12px;
       `;
       
@@ -1502,7 +1519,7 @@ function createLocationIQDropdown(inputElement, scope) {
       item.dataset.lon = result.lon;
       
       item.innerHTML = `
-        <div style="font-weight: bold; color: #00ccff;">${result.display_place || result.address?.name || 'Unknown'}</div>
+        <div style="font-weight: bold; color: var(--accent-color);">${result.display_place || result.address?.name || 'Unknown'}</div>
         <div style="color: #888; font-size: 11px;">${result.display_address || result.display_name || ''}</div>
       `;
       
@@ -1575,11 +1592,11 @@ function selectLocationIQItem(item, inputElement, dropdown, scope) {
 function updateSelection(items, selectedIndex) {
   items.forEach((item, index) => {
     if (index === selectedIndex) {
-      item.style.backgroundColor = '#003300';
-      item.style.color = '#00ff00';
+      item.style.backgroundColor = 'var(--hover-color)';
+      item.style.color = 'var(--primary-color)';
     } else {
       item.style.backgroundColor = 'transparent';
-      item.style.color = '#00ff00';
+      item.style.color = 'var(--primary-color)';
     }
   });
 }
@@ -1607,8 +1624,8 @@ async function startAddressSearch(callId, originalMarker, modal) {
     html: `<div class="marker-pulse" style="
       width: 20px;
       height: 20px;
-      background: rgba(0, 255, 0, 0.6);
-      border: 2px solid #00ff00;
+      background: rgba(var(--primary-rgb), 0.6);
+      border: 2px solid var(--primary-color);
       border-radius: 50%;
       animation: pulse 1.5s infinite;
     "></div>`,
@@ -1626,19 +1643,19 @@ async function startAddressSearch(callId, originalMarker, modal) {
   banner.className = 'address-search-banner';
   banner.style.cssText = `
     position: fixed; top: 0; left: 0; right: 0;
-    background-color: rgba(0, 0, 0, 0.9);
-    color: #00ff00; padding: 15px; text-align: center; z-index: 2000;
-    font-family: 'Share Tech Mono', monospace;
-    border-bottom: 2px solid #00ff00;
-    box-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
+    background-color: rgba(var(--panel-rgb), 0.9);
+    color: var(--primary-color); padding: 15px; text-align: center; z-index: 2000;
+    font-family: var(--font-family);
+    border-bottom: 2px solid var(--primary-color);
+    box-shadow: 0 0 10px rgba(var(--primary-rgb), 0.5);
   `;
 
   banner.innerHTML = `
     <div style="margin-bottom: 10px;"><strong>🔍 Search Address</strong></div>
-    <div style="margin-bottom: 15px; padding: 10px; background-color: rgba(0, 51, 0, 0.7); border: 1px solid rgba(0, 255, 0, 0.3); border-radius: 4px; text-align: left; max-height: 60px; overflow-y: auto;">
+    <div style="margin-bottom: 15px; padding: 10px; background-color: rgba(var(--hover-rgb), 0.7); border: 1px solid rgba(var(--primary-rgb), 0.3); border-radius: 4px; text-align: left; max-height: 60px; overflow-y: auto;">
       <div style="display: flex; align-items: center; gap: 8px;">
-        <span style="color: #00ccff; font-weight: bold;">${category}</span>
-        <span style="flex: 1; color: #00ff00; overflow: hidden; text-overflow: ellipsis;">${transcription}</span>
+        <span style="color: var(--accent-color); font-weight: bold;">${category}</span>
+        <span style="flex: 1; color: var(--primary-color); overflow: hidden; text-overflow: ellipsis;">${transcription}</span>
       </div>
     </div>
     <div id="address-search-container" style="display: flex; justify-content: center; margin-bottom: 10px; padding: 0 15px;">
@@ -1646,17 +1663,17 @@ async function startAddressSearch(callId, originalMarker, modal) {
     </div>
     <div style="display: flex; justify-content: center; gap: 10px;">
       <button id="confirm-address" style="
-        background-color: #003300; color: #00ff00;
-        border: 1px solid #00ff00; padding: 8px 16px;
+        background-color: var(--hover-color); color: var(--primary-color);
+        border: 1px solid var(--primary-color); padding: 8px 16px;
         cursor: pointer; border-radius: 4px;
-        font-family: 'Share Tech Mono', monospace;
+        font-family: var(--font-family);
         opacity: 0.5; pointer-events: none;
       ">Confirm New Location</button>
       <button id="cancel-address-search" style="
-        background-color: #330000; color: #ff0000;
-        border: 1px solid #ff0000; padding: 8px 16px;
+        background-color: var(--danger-bg); color: var(--danger-color);
+        border: 1px solid var(--danger-color); padding: 8px 16px;
         cursor: pointer; border-radius: 4px;
-        font-family: 'Share Tech Mono', monospace;
+        font-family: var(--font-family);
       ">Cancel</button>
     </div>
   `;
@@ -1676,11 +1693,11 @@ async function startAddressSearch(callId, originalMarker, modal) {
     inputElement.style.cssText = `
       width: 100%;
       padding: 8px 10px;
-      background-color: #000;
-      color: #00ff00;
-      border: 1px solid #00ff00;
+      background-color: var(--background-color);
+      color: var(--primary-color);
+      border: 1px solid var(--primary-color);
       border-radius: 4px;
-      font-family: 'Share Tech Mono', monospace;
+      font-family: var(--font-family);
       font-size: 14px;
       box-sizing: border-box;
     `;
@@ -2059,8 +2076,8 @@ function startMarkerRelocation(callId, originalMarker, modal) {
     html: `<div class="marker-pulse" style="
       width: 20px;
       height: 20px;
-      background: rgba(0, 255, 0, 0.6);
-      border: 2px solid #00ff00;
+      background: rgba(var(--primary-rgb), 0.6);
+      border: 2px solid var(--primary-color);
       border-radius: 50%;
       animation: pulse 1.5s infinite;
     "></div>`,
@@ -2079,13 +2096,13 @@ function startMarkerRelocation(callId, originalMarker, modal) {
   style.textContent = `
     @keyframes pulse {
       0% {
-        box-shadow: 0 0 0 0 rgba(0, 255, 0, 0.7);
+        box-shadow: 0 0 0 0 rgba(var(--primary-rgb), 0.7);
       }
       70% {
-        box-shadow: 0 0 0 15px rgba(0, 255, 0, 0);
+        box-shadow: 0 0 0 15px rgba(var(--primary-rgb), 0);
       }
       100% {
-        box-shadow: 0 0 0 0 rgba(0, 255, 0, 0);
+        box-shadow: 0 0 0 0 rgba(var(--primary-rgb), 0);
       }
     }
     .preview-marker {
@@ -2108,41 +2125,41 @@ function startMarkerRelocation(callId, originalMarker, modal) {
     top: 0;
     left: 0;
     right: 0;
-    background-color: rgba(0, 0, 0, 0.9);
-    color: #00ff00;
+    background-color: rgba(var(--panel-rgb), 0.9);
+    color: var(--primary-color);
     padding: 15px;
     text-align: center;
     z-index: 2000;
-    font-family: 'Share Tech Mono', monospace;
-    border-bottom: 2px solid #00ff00;
-    box-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
+    font-family: var(--font-family);
+    border-bottom: 2px solid var(--primary-color);
+    box-shadow: 0 0 10px rgba(var(--primary-rgb), 0.5);
   `;
 
   banner.innerHTML = `
     <div style="margin-bottom: 10px;">
       <strong>🎯 Relocate Marker</strong><br>
       <span style="font-size: 0.9em;">
-        <span class="ellipsis" style="color: #00ff00;">Drag the pulsing marker or click anywhere on the map to set new location</span>
+        <span class="ellipsis" style="color: var(--primary-color);">Drag the pulsing marker or click anywhere on the map to set new location</span>
       </span>
     </div>
     <div style="display: flex; justify-content: center; gap: 10px;">
       <button id="confirm-location" style="
-        background-color: #003300;
-        color: #00ff00;
-        border: 1px solid #00ff00;
+        background-color: var(--hover-color);
+        color: var(--primary-color);
+        border: 1px solid var(--primary-color);
         padding: 8px 16px;
         cursor: pointer;
         border-radius: 4px;
-        font-family: 'Share Tech Mono', monospace;
+        font-family: var(--font-family);
       ">Confirm New Location</button>
       <button id="cancel-relocation" style="
-        background-color: #330000;
-        color: #ff0000;
-        border: 1px solid #ff0000;
+        background-color: var(--danger-bg);
+        color: var(--danger-color);
+        border: 1px solid var(--danger-color);
         padding: 8px 16px;
         cursor: pointer;
         border-radius: 4px;
-        font-family: 'Share Tech Mono', monospace;
+        font-family: var(--font-family);
       ">Cancel</button>
     </div>
   `;
@@ -2331,32 +2348,36 @@ function handleMarkerVisibility(marker) {
     if (visibleParent === marker) {
         // Marker is visible, open popup
         openMarkerPopup(marker);
-        playAudioForMarker(marker);
     } else if (visibleParent instanceof L.MarkerCluster) {
         // Marker is in a cluster
         visibleParent.spiderfy();
-        
+
         // Wait for spiderfy animation to complete
-        setTimeout(() => {
-            openMarkerPopup(marker);
-            playAudioForMarker(marker);
-        }, 300);
+        setTimeout(() => openMarkerPopup(marker), 300);
     } else {
         console.error('Unexpected state: marker is neither visible nor in a cluster');
     }
 }
 
-function playAudioForMarker(marker) {
-    if (!isNewCallAudioMuted) {
-        const callId = getCallIdFromMarker(marker);
-        if (callId && wavesurfers[callId]) {
-            wavesurfers[callId].play();
-            const playPauseButton = document.querySelector(`.play-pause[data-call-id="${callId}"]`);
-            if (playPauseButton) {
-                playPauseButton.textContent = 'Pause';
-            }
-        }
+// CallAudio item body for a tracked call: open its popup and play it to the
+// end, then call done() so the next tracked call can take over.
+function playTrackedMarker(marker, callId, done) {
+    marker.shouldPlayAudio = false; // this flow plays it; don't replay on a later popup open
+    if (isNewCallAudioMuted) {
+        handleMarkerVisibility(marker);
+        done(); // nothing to listen to; move straight on
+        return;
     }
+    if (marker.isPopupOpen() && wavesurfers[callId]) {
+        // Popup already open (e.g. the user opened it): play the existing player
+        return playWaveSurferUntilDone(wavesurfers[callId], done, callId);
+    }
+    marker.pendingAutoPlay = done; // consumed by the popupopen handler once audio is ready
+    handleMarkerVisibility(marker);
+}
+
+function setPlayButtonLabel(callId, label) {
+    document.querySelectorAll(`.play-pause[data-call-id="${callId}"]`).forEach((b) => { b.textContent = label; });
 }
 
 function openMarkerPopup(marker) {
@@ -2450,14 +2471,6 @@ function playNewCallSound() {
     if (!isNewCallAudioMuted) {
         const audio = new Audio(appConfig.audio.notificationSound);
         audio.play().catch(error => console.error('Error playing notification sound:', error));
-    }
-}
-
-function playAudio(audioId) {
-    if (!isNewCallAudioMuted && wavesurfers[audioId]) {
-        wavesurfers[audioId].play();
-    } else {
-        console.log('New call audio is muted or WaveSurfer not initialized. Audio not played:', audioId);
     }
 }
 
@@ -2741,87 +2754,163 @@ function getCallIdFromMarker(marker) {
     return null;
 }
 
-function setupHeatmapControls() {
-    const heatmapCheckbox = document.getElementById('enable-heatmap');
-    const intensitySliderContainer = document.getElementById('heatmap-intensity-container');
-    const intensitySlider = document.getElementById('heatmap-intensity');
+// --- Heatmap ---------------------------------------------------------------
+// Built from the calls currently visible (time range + category filters apply).
+// A panel (bottom-right, shown while the heatmap is on) picks how calls are
+// weighted, sets sensitivity, can dim the markers, shows a legend, and lists
+// the busiest areas; clicking one zooms there.
 
-    if (heatmapCheckbox && intensitySliderContainer && intensitySlider) {
-        heatmapCheckbox.addEventListener('change', handleHeatmapToggle);
+const HEATMAP_MODES = {
+    density: { label: 'All calls', hint: 'Every call counts the same.' },
+    recent: { label: 'Recent activity', hint: 'Newer calls count more; fades across the selected time range.' },
+    severity: { label: 'Emergencies', hint: 'Fire, medical, crash and violence calls count more than service calls.' },
+};
 
-        // Set initial visibility of intensity slider container
-        intensitySliderContainer.style.display = heatmapCheckbox.checked ? 'flex' : 'none';
+// Category weights for the "Emergencies" mode (keys match CATEGORY_COLORS)
+const HEATMAP_SEVERITY = [
+    [/FIRE|HAZMAT|CARBON MONOXIDE|GUN|ASSAULT|ABDUCTION|SHOOTING|STABBING/, 3],
+    [/MEDICAL|UNCONSCIOUS|BREATHING|INJURED|PASSED OUT|CONSCIOUSNESS|COLLISION|MVC|FIGHT/, 2],
+    [/BURGLARY|DISTURBANCE|STOLEN|RECKLESS|TRAFFIC|MISSING|INTOXICATED|ANIMAL BITE/, 1.25],
+];
 
-        // Set initial fill for intensity slider
-        updateSliderFill(intensitySlider);
+const HEATMAP_GRADIENT = { 0.2: '#2b83ba', 0.4: '#abdda4', 0.6: '#ffffbf', 0.8: '#fdae61', 1.0: '#d7191c' };
+const HOTSPOT_CELL_DEG = 0.005; // ~550 m grid for the hotspot list
 
-        // Remove all existing event listeners by cloning the slider
-        const newIntensitySlider = intensitySlider.cloneNode(true);
-        intensitySlider.parentNode.replaceChild(newIntensitySlider, intensitySlider);
-        
-        // Add specific heatmap intensity handler - NOT volume related
-        newIntensitySlider.addEventListener('input', function(e) {
-            // IMPORTANT: Only handle heatmap intensity, NOT volume
-            heatmapIntensity = parseInt(this.value, 10);
-            console.log(`[HEATMAP] Intensity changed to ${heatmapIntensity}`);
-            
-            if (document.getElementById('enable-heatmap').checked) {
-                updateHeatmap();
-            }
-            
-            // Update slider fill visual only
-            updateSliderFill(this);
-        });
+const heatmapState = {
+    mode: 'density',
+    sensitivity: 5,       // 1-10 slider; higher = hotter colors from fewer calls
+    dimMarkers: true,
+    panel: null,
+    hotspotCircle: null,
+    renderTimer: null,
+};
 
-        console.log("[HEATMAP] Heatmap controls initialized correctly");
-    } else {
-        console.error('[HEATMAP] Heatmap control elements not found');
+function heatmapWeight(data, nowSec) {
+    if (heatmapState.mode === 'recent') {
+        const ageHours = Math.max(0, (nowSec - Number(data.timestamp)) / 3600);
+        const halfLife = Math.max(0.5, (typeof timeRangeHours === 'number' ? timeRangeHours : 12) / 4);
+        return Math.pow(0.5, ageHours / halfLife);
     }
+    if (heatmapState.mode === 'severity') {
+        const cat = String(data.category || '').toUpperCase();
+        const hit = HEATMAP_SEVERITY.find(([re]) => re.test(cat));
+        return hit ? hit[1] : 0.5;
+    }
+    return 1;
 }
 
-// Fixed handleIntensityChange to ONLY affect heatmap, not volume
-function handleIntensityChange(event) {
-    // ONLY handle heatmap intensity here, NOT volume
-    heatmapIntensity = parseInt(event.target.value, 10);
-    console.log(`[HEATMAP] Intensity handler called with value: ${heatmapIntensity}`);
-    
-    if (document.getElementById('enable-heatmap').checked) {
-        updateHeatmap();
-    }
+function collectHeatPoints() {
+    const nowSec = Date.now() / 1000;
+    const points = [];
+    Object.values(allMarkers).forEach((data) => {
+        if (!data.visible) return;
+        const ll = data.marker.getLatLng();
+        points.push({ lat: ll.lat, lng: ll.lng, w: heatmapWeight(data, nowSec), category: data.category || 'OTHER' });
+    });
+    return points;
 }
 
-function handleHeatmapToggle(event) {
-    const intensitySliderContainer = document.getElementById('heatmap-intensity-container');
-    if (event.target.checked) {
-        intensitySliderContainer.style.display = 'flex';
-        showHeatmap();
-    } else {
-        intensitySliderContainer.style.display = 'none';
-        hideHeatmap();
+// leaflet.heat sums weights into a pixel grid (cells of radius/2 px), scales
+// them down by 2x per zoom level below its maxZoom, and colors by sum / max.
+// Compute the busiest cell the same way so the scale fits the data at the
+// current zoom (a fixed max either washed out or saturated into one blob).
+// Sensitivity 5 = a cell needs ~1/4 of the busiest cell's weight to go red.
+function heatmapMax(points) {
+    const zoom = map.getZoom();
+    const zoomScale = 1 / Math.pow(2, Math.max(0, Math.min(appConfig.heatmap.maxZoom - zoom, 12)));
+    const cellPx = appConfig.heatmap.radius / 2;
+    const cells = new Map();
+    for (const p of points) {
+        const pt = map.project([p.lat, p.lng], zoom);
+        const key = `${Math.floor(pt.x / cellPx)}:${Math.floor(pt.y / cellPx)}`;
+        cells.set(key, (cells.get(key) || 0) + p.w * zoomScale);
     }
+    const busiest = cells.size ? Math.max(...cells.values()) : zoomScale;
+    const factor = Math.pow(2, (heatmapState.sensitivity - 5) / 1.5); // 1..10 -> ~0.15x..10x
+    return Math.max(1e-4, (busiest / 4) / factor);
+}
+
+function computeHotspots(points, limit = 5) {
+    const cells = new Map();
+    for (const p of points) {
+        const gy = Math.floor(p.lat / HOTSPOT_CELL_DEG);
+        const gx = Math.floor(p.lng / HOTSPOT_CELL_DEG);
+        const key = `${gy}:${gx}`;
+        let c = cells.get(key);
+        if (!c) { c = { gy, gx, count: 0, weight: 0, lat: 0, lng: 0, cats: new Map() }; cells.set(key, c); }
+        c.count++;
+        c.weight += p.w;
+        c.lat += p.lat;
+        c.lng += p.lng;
+        c.cats.set(p.category, (c.cats.get(p.category) || 0) + 1);
+    }
+    // A cluster on a grid line lands in neighboring cells; fold each cell into
+    // the busiest neighbor already claimed so one area is listed once
+    const merged = [];
+    const owner = new Map(); // "gy:gx" -> merged hotspot
+    for (const c of [...cells.values()].sort((a, b) => b.weight - a.weight)) {
+        let target = null;
+        for (let dy = -1; dy <= 1 && !target; dy++) {
+            for (let dx = -1; dx <= 1 && !target; dx++) target = owner.get(`${c.gy + dy}:${c.gx + dx}`) || null;
+        }
+        if (target) {
+            target.count += c.count;
+            target.weight += c.weight;
+            target.lat += c.lat;
+            target.lng += c.lng;
+            c.cats.forEach((n, cat) => target.cats.set(cat, (target.cats.get(cat) || 0) + n));
+        } else {
+            target = c;
+            merged.push(c);
+        }
+        owner.set(`${c.gy}:${c.gx}`, target);
+    }
+    return merged
+        .filter((c) => c.count >= 2)
+        .sort((a, b) => b.weight - a.weight)
+        .slice(0, limit)
+        .map((c) => ({
+            lat: c.lat / c.count,
+            lng: c.lng / c.count,
+            count: c.count,
+            topCats: [...c.cats.entries()].sort((a, b) => b[1] - a[1]).slice(0, 2),
+        }));
+}
+
+function titleCase(s) {
+    return String(s).toLowerCase().replace(/\b\w/g, (ch) => ch.toUpperCase());
+}
+
+function renderHeatmap() {
+    if (!document.getElementById('enable-heatmap').checked) return;
+    const points = collectHeatPoints();
+    const latlngs = points.map((p) => [p.lat, p.lng, p.w]);
+    const options = {
+        radius: appConfig.heatmap.radius,
+        blur: appConfig.heatmap.blur,
+        maxZoom: appConfig.heatmap.maxZoom,
+        max: heatmapMax(points),
+        minOpacity: 0.25,
+        gradient: HEATMAP_GRADIENT,
+    };
+    if (!heatmapLayer) {
+        heatmapLayer = L.heatLayer(latlngs, options).addTo(map);
+    } else {
+        heatmapLayer.setOptions(options);
+        heatmapLayer.setLatLngs(latlngs);
+    }
+    renderHotspotList(computeHotspots(points), points.length);
+}
+
+// Called by the rest of the app whenever calls or filters change
+function updateHeatmap() {
+    clearTimeout(heatmapState.renderTimer);
+    heatmapState.renderTimer = setTimeout(renderHeatmap, 150); // coalesce bursts of new calls
 }
 
 function showHeatmap() {
-    // Collect data points from visible markers
-    const heatData = [];
-
-    Object.values(allMarkers).forEach(data => {
-        if (data.visible) {
-            const latlng = data.marker.getLatLng();
-            heatData.push([latlng.lat, latlng.lng, heatmapIntensity]); // Use intensity value
-        }
-    });
-
-    if (heatmapLayer) {
-        map.removeLayer(heatmapLayer);
-    }
-
-    heatmapLayer = L.heatLayer(heatData, { 
-        radius: appConfig.heatmap.radius, 
-        blur: appConfig.heatmap.blur, 
-        maxZoom: appConfig.heatmap.maxZoom 
-    });
-    heatmapLayer.addTo(map);
+    showHeatmapPanel(true);
+    renderHeatmap();
 }
 
 function hideHeatmap() {
@@ -2829,24 +2918,147 @@ function hideHeatmap() {
         map.removeLayer(heatmapLayer);
         heatmapLayer = null;
     }
+    if (heatmapState.hotspotCircle) {
+        map.removeLayer(heatmapState.hotspotCircle);
+        heatmapState.hotspotCircle = null;
+    }
+    showHeatmapPanel(false);
 }
 
-function updateHeatmap() {
-    if (!heatmapLayer) {
-        showHeatmap();
+function applyMarkerDimming() {
+    const on = document.getElementById('enable-heatmap').checked && heatmapState.dimMarkers;
+    map.getContainer().classList.toggle('heatmap-dim-markers', on);
+}
+
+function renderHotspotList(hotspots, totalCalls) {
+    const panel = heatmapState.panel;
+    if (!panel) return;
+    const list = panel.querySelector('.heatmap-hotspots');
+    const summary = panel.querySelector('.heatmap-summary');
+    summary.textContent = `${totalCalls} call${totalCalls === 1 ? '' : 's'} in view`;
+    list.innerHTML = '';
+    if (!hotspots.length) {
+        list.innerHTML = '<li class="heatmap-empty">No hotspots yet (need 2+ calls in one area)</li>';
         return;
     }
-
-    const heatData = [];
-
-    Object.values(allMarkers).forEach(data => {
-        if (data.visible) {
-            const latlng = data.marker.getLatLng();
-            heatData.push([latlng.lat, latlng.lng, heatmapIntensity]); // Use intensity value
-        }
+    hotspots.forEach((h, i) => {
+        const li = document.createElement('li');
+        li.className = 'heatmap-hotspot';
+        li.tabIndex = 0;
+        const cats = h.topCats.map(([cat, n]) => `${titleCase(cat)} ${n}`).join(', ');
+        li.innerHTML = `<span class="hotspot-rank">${i + 1}</span>` +
+            `<span class="hotspot-text"><b>${h.count} calls</b><small>${cats}</small></span>`;
+        const go = () => {
+            map.flyTo([h.lat, h.lng], Math.max(map.getZoom(), 15), { duration: 0.8 });
+            if (heatmapState.hotspotCircle) map.removeLayer(heatmapState.hotspotCircle);
+            heatmapState.hotspotCircle = L.circle([h.lat, h.lng], {
+                radius: 350, color: '#d7191c', weight: 2, fill: false, dashArray: '6 6', interactive: false,
+            }).addTo(map);
+        };
+        li.addEventListener('click', go);
+        li.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
+        list.appendChild(li);
     });
+}
 
-    heatmapLayer.setLatLngs(heatData);
+function buildHeatmapPanel() {
+    const Panel = L.Control.extend({
+        options: { position: 'bottomright' }, // bottom-left collides with the Categories sidebar
+        onAdd() {
+            const div = L.DomUtil.create('div', 'heatmap-panel');
+            const modeOptions = Object.entries(HEATMAP_MODES)
+                .map(([id, m]) => `<option value="${id}">${m.label}</option>`).join('');
+            div.innerHTML = `
+                <div class="heatmap-panel-title">Heatmap</div>
+                <label class="heatmap-row">Weight by
+                    <select class="heatmap-mode">${modeOptions}</select>
+                </label>
+                <div class="heatmap-hint"></div>
+                <label class="heatmap-row">Sensitivity
+                    <input type="range" class="heatmap-sensitivity" min="1" max="10" step="1">
+                </label>
+                <div class="heatmap-legend"><span>Fewer</span><i></i><span>More</span></div>
+                <label class="heatmap-check"><input type="checkbox" class="heatmap-dim"> Dim markers</label>
+                <div class="heatmap-panel-subtitle">Busiest areas <span class="heatmap-summary"></span></div>
+                <ol class="heatmap-hotspots"></ol>`;
+            L.DomEvent.disableClickPropagation(div);
+            L.DomEvent.disableScrollPropagation(div);
+            return div;
+        },
+    });
+    const control = new Panel();
+    control.addTo(map);
+    // The color scale depends on zoom (see heatmapMax)
+    map.on('zoomend', () => { if (document.getElementById('enable-heatmap').checked) renderHeatmap(); });
+    const div = control.getContainer();
+    heatmapState.panel = div;
+
+    const modeSel = div.querySelector('.heatmap-mode');
+    const hint = div.querySelector('.heatmap-hint');
+    const sens = div.querySelector('.heatmap-sensitivity');
+    const dim = div.querySelector('.heatmap-dim');
+    modeSel.value = heatmapState.mode;
+    hint.textContent = HEATMAP_MODES[heatmapState.mode].hint;
+    sens.value = heatmapState.sensitivity;
+    dim.checked = heatmapState.dimMarkers;
+
+    modeSel.addEventListener('change', () => {
+        heatmapState.mode = modeSel.value;
+        hint.textContent = HEATMAP_MODES[heatmapState.mode].hint;
+        saveHeatmapPrefs();
+        renderHeatmap();
+    });
+    sens.addEventListener('input', () => {
+        heatmapState.sensitivity = parseInt(sens.value, 10);
+        saveHeatmapPrefs();
+        renderHeatmap();
+    });
+    dim.addEventListener('change', () => {
+        heatmapState.dimMarkers = dim.checked;
+        saveHeatmapPrefs();
+        applyMarkerDimming();
+    });
+}
+
+function showHeatmapPanel(visible) {
+    if (visible && !heatmapState.panel) buildHeatmapPanel();
+    if (heatmapState.panel) heatmapState.panel.style.display = visible ? '' : 'none';
+    applyMarkerDimming();
+}
+
+function loadHeatmapPrefs() {
+    try {
+        const saved = JSON.parse(localStorage.getItem('scannerMap.heatmap') || '{}');
+        if (HEATMAP_MODES[saved.mode]) heatmapState.mode = saved.mode;
+        if (saved.sensitivity >= 1 && saved.sensitivity <= 10) heatmapState.sensitivity = saved.sensitivity;
+        if (typeof saved.dimMarkers === 'boolean') heatmapState.dimMarkers = saved.dimMarkers;
+    } catch (e) { /* storage unavailable */ }
+}
+
+function saveHeatmapPrefs() {
+    try {
+        localStorage.setItem('scannerMap.heatmap', JSON.stringify({
+            mode: heatmapState.mode, sensitivity: heatmapState.sensitivity, dimMarkers: heatmapState.dimMarkers,
+        }));
+    } catch (e) { /* storage unavailable */ }
+}
+
+function setupHeatmapControls() {
+    const heatmapCheckbox = document.getElementById('enable-heatmap');
+    if (!heatmapCheckbox) {
+        console.error('[HEATMAP] Heatmap checkbox not found');
+        return;
+    }
+    loadHeatmapPrefs();
+    // Sensitivity now lives in the heatmap panel; retire the old top-bar slider
+    const oldSlider = document.getElementById('heatmap-intensity-container');
+    if (oldSlider) oldSlider.style.display = 'none';
+    heatmapCheckbox.addEventListener('change', handleHeatmapToggle);
+}
+
+function handleHeatmapToggle(event) {
+    if (event.target.checked) showHeatmap();
+    else hideHeatmap();
 }
 
 function isMobile() {
@@ -2899,6 +3111,200 @@ function isValidCall(call) {
     return isValid;
 }
 
+// --- One audio channel for every call player -------------------------------
+// Tracked map calls, Live Feed audio and talkgroup-history autoplay all queue
+// here and play one at a time, each to the end before the next starts (the map
+// doesn't fly to the next tracked call until the current one finishes).
+// A manual Play click interrupts whatever is playing; the queue resumes after.
+//
+// Queue items: { id, start(done) -> stop() }. start() must call done() exactly
+// when playback ends, fails or is stopped; it may return a stop function.
+const CallAudio = {
+    current: null,      // { id, stop, done }
+    queue: [],
+    MAX_ITEM_MS: 5 * 60 * 1000, // safety net if a player never reports the end
+
+    has(id) {
+        const key = String(id);
+        return (this.current && String(this.current.id) === key) || this.queue.some((q) => String(q.id) === key);
+    },
+
+    enqueue(item) {
+        if (item.id != null && this.has(item.id)) return false; // same call from map + live feed
+        this.queue.push(item);
+        this._pump();
+        return true;
+    },
+
+    // Manual play: stop the current audio and play this now; the queue waits
+    interrupt(id, stopFn) {
+        this._stopCurrent();
+        const entry = { id, stop: stopFn };
+        entry.done = () => this._finish(entry);
+        this.current = entry;
+        return entry.done; // caller invokes when its manual playback ends
+    },
+
+    _stopCurrent() {
+        const cur = this.current;
+        if (!cur) return;
+        this.current = null;
+        try { if (cur.stop) cur.stop(); } catch (e) { /* already stopped */ }
+        if (cur.timer) clearTimeout(cur.timer);
+    },
+
+    _finish(entry) {
+        if (this.current !== entry) return; // already replaced or finished
+        if (entry.timer) clearTimeout(entry.timer);
+        this.current = null;
+        this._pump();
+    },
+
+    _pump() {
+        if (this.current || !this.queue.length) return;
+        const item = this.queue.shift();
+        const entry = { id: item.id, stop: null };
+        entry.done = () => this._finish(entry);
+        entry.timer = setTimeout(entry.done, this.MAX_ITEM_MS);
+        this.current = entry;
+        try {
+            const stop = item.start(entry.done);
+            if (typeof stop === 'function') entry.stop = stop;
+        } catch (e) {
+            console.error('[CallAudio] failed to start', item.id, e);
+            entry.done();
+        }
+    },
+};
+
+// Play a WaveSurfer instance through CallAudio's current slot: done() fires
+// once when it finishes, is paused/closed, errors or is destroyed.
+function playWaveSurferUntilDone(ws, done, callId = null) {
+    let finished = false;
+    const finish = () => {
+        if (finished) return;
+        finished = true;
+        if (callId != null) setPlayButtonLabel(callId, 'Play');
+        done();
+    };
+    if (callId != null) setPlayButtonLabel(callId, 'Pause');
+    ['finish', 'pause', 'error', 'destroy'].forEach((evt) => {
+        try { (ws.once ? ws.once.bind(ws) : ws.on.bind(ws))(evt, finish); } catch (e) { /* unsupported */ }
+    });
+    try {
+        ws.setVolume && ws.setVolume(globalVolumeLevel);
+        // Browsers suspend audio until a user gesture; resume if we can (v6 webaudio backend)
+        const ctx = ws.backend && typeof ws.backend.getAudioContext === 'function' ? ws.backend.getAudioContext() : null;
+        if (ctx && ctx.state === 'suspended') ctx.resume().catch(() => {});
+        const result = ws.play();
+        if (result && typeof result.catch === 'function') result.catch(finish); // v7 returns a promise
+    } catch (e) {
+        finish();
+    }
+    return () => { try { ws.pause(); } catch (e) { /* destroyed */ } };
+}
+
+// Every waveform created, so a theme change can recolor the ones on screen
+const themedWaveSurfers = new Set();
+
+document.addEventListener('scannermap:themechange', () => {
+    const colors = {
+        waveColor: ScannerTheme.color('--wave-color'),
+        progressColor: ScannerTheme.color('--wave-progress-color'),
+        cursorColor: ScannerTheme.color('--wave-cursor-color'),
+    };
+    themedWaveSurfers.forEach((ws) => {
+        try {
+            if (typeof ws.setOptions === 'function') {
+                ws.setOptions(colors); // wavesurfer v7
+            } else {
+                ws.setWaveColor && ws.setWaveColor(colors.waveColor); // v6
+                ws.setProgressColor && ws.setProgressColor(colors.progressColor);
+                ws.setCursorColor && ws.setCursorColor(colors.cursorColor);
+            }
+        } catch (e) {
+            themedWaveSurfers.delete(ws); // destroyed instance
+        }
+    });
+});
+
+// Sound Recorder-style extras around a waveform: Position/Length readout,
+// a seek trackbar and transport buttons (rewind, fast-forward, stop, record).
+// Always added, but only shown by themes that style them (Windows 95);
+// other themes hide the .sr-* elements and keep the plain Play button.
+function attachRecorderControls(ws, waveformEl, controlsContainer, callId) {
+    const parent = waveformEl.parentElement;
+    if (!parent) return;
+    // Re-init of the same player: drop the previous set first
+    parent.querySelectorAll(`[data-sr-for="${callId}"]`).forEach((el) => el.remove());
+
+    const fmt = (sec) => `${(Number.isFinite(sec) ? sec : 0).toFixed(2)} sec.`;
+
+    const readout = document.createElement('div');
+    readout.className = 'sr-readout';
+    readout.dataset.srFor = callId;
+    readout.innerHTML = '<span>Position:<b class="sr-pos">0.00 sec.</b></span><span>Length:<b class="sr-len">0.00 sec.</b></span>';
+    waveformEl.before(readout);
+
+    const track = document.createElement('input');
+    track.type = 'range';
+    track.className = 'sr-track';
+    track.min = '0';
+    track.max = '1000';
+    track.value = '0';
+    track.dataset.srFor = callId;
+    track.setAttribute('aria-label', 'Seek');
+    waveformEl.after(track);
+
+    const posEl = readout.querySelector('.sr-pos');
+    const lenEl = readout.querySelector('.sr-len');
+    let dragging = false;
+    const update = () => {
+        const duration = ws.getDuration ? ws.getDuration() : 0;
+        const current = ws.getCurrentTime ? ws.getCurrentTime() : 0;
+        posEl.textContent = fmt(current);
+        lenEl.textContent = fmt(duration);
+        if (!dragging && duration > 0) track.value = String(Math.round((current / duration) * 1000));
+    };
+    // v6 and v7 event names differ; subscribe to both
+    ['ready', 'audioprocess', 'timeupdate', 'seek', 'seeking', 'interaction', 'finish', 'pause'].forEach((evt) => {
+        try { ws.on(evt, update); } catch (e) { /* event not supported by this version */ }
+    });
+    track.addEventListener('input', () => { dragging = true; });
+    track.addEventListener('change', () => {
+        dragging = false;
+        try { ws.seekTo(Number(track.value) / 1000); } catch (e) { /* not loaded yet */ }
+        update();
+    });
+
+    const controls = controlsContainer && controlsContainer.querySelector('.audio-controls');
+    const playButton = controls && controls.querySelector(`.play-pause[data-call-id="${callId}"]`);
+    if (!playButton) return;
+
+    const setPlayLabel = () => { playButton.textContent = 'Play'; };
+    const makeButton = (cls, label, onClick) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = `sr-btn ${cls}`;
+        b.dataset.srFor = callId;
+        b.setAttribute('aria-label', label);
+        b.title = label;
+        if (onClick) b.addEventListener('click', onClick); else b.disabled = true;
+        return b;
+    };
+    const seek = (p) => { try { ws.seekTo(p); } catch (e) { /* not loaded yet */ } update(); };
+
+    playButton.classList.add('sr-play');
+    playButton.before(
+        makeButton('sr-rewind', 'Seek to start', () => seek(0)),
+        makeButton('sr-forward', 'Seek to end', () => { if (ws.isPlaying()) { ws.pause(); setPlayLabel(); } seek(0.999); })
+    );
+    playButton.after(
+        makeButton('sr-stop', 'Stop', () => { ws.pause(); seek(0); setPlayLabel(); }),
+        makeButton('sr-record', 'Record', null) // the classic disabled record button
+    );
+}
+
 // Initialize WaveSurfer
 function initWaveSurfer(callId, audioUrl, wavesurferStore, onReadyCallback, containerSelector = null) {
     const containerId = containerSelector || `waveform-${callId}`;
@@ -2929,14 +3335,18 @@ function initWaveSurfer(callId, audioUrl, wavesurferStore, onReadyCallback, cont
         // Create WaveSurfer instance
         wavesurferStore[callId] = WaveSurfer.create({
             container: `#${containerId}`, // Use the dynamic or default container ID
-            waveColor: '#00ff00',
-            progressColor: '#008000',
-            cursorColor: '#ffffff',
+            // Canvas colors can't use CSS variables; read the active theme's values
+            waveColor: ScannerTheme.color('--wave-color'),
+            progressColor: ScannerTheme.color('--wave-progress-color'),
+            cursorColor: ScannerTheme.color('--wave-cursor-color'),
             height: containerId.startsWith('tg-') ? 25 : 30, // Use smaller height for talkgroup modal
             normalize: true,
             backend: 'webaudio',
             volume: globalVolumeLevel, // Set initial volume from global setting
         });
+        const createdWaveSurfer = wavesurferStore[callId];
+        themedWaveSurfers.add(createdWaveSurfer);
+        createdWaveSurfer.on('destroy', () => themedWaveSurfers.delete(createdWaveSurfer));
 
         // console.log(`[Audio] Created new WaveSurfer instance for callId ${callId} with initial volume ${globalVolumeLevel}`); // REMOVED THIS LOG
 
@@ -2982,40 +3392,17 @@ function initWaveSurfer(callId, audioUrl, wavesurferStore, onReadyCallback, cont
                     wavesurferStore[callId].pause();
                     this.textContent = 'Play';
                 } else {
-                    // Pause all other playing wavesurfers in the *same* store
-                    Object.keys(wavesurferStore).forEach(wsCallId => {
-                        if (wsCallId !== callId.toString() && wavesurferStore[wsCallId] && wavesurferStore[wsCallId].isPlaying()) {
-                            wavesurferStore[wsCallId].pause();
-                            const otherButton = document.querySelector(`.play-pause[data-call-id="${wsCallId}"]`);
-                            if (otherButton) otherButton.textContent = 'Play';
-                        }
-                    });
-
-                    // Resume audio context if needed before playing
-                    if (wavesurferStore[callId].backend && typeof wavesurferStore[callId].backend.getAudioContext === 'function') {
-                        const audioContext = wavesurferStore[callId].backend.getAudioContext();
-                        if (audioContext.state === 'suspended') {
-                            audioContext.resume().then(() => {
-                                console.log('[Audio] AudioContext resumed before playing wavesurfer audio');
-                                wavesurferStore[callId].play();
-                                this.textContent = 'Pause';
-                            }).catch(e => {
-                                console.error('[Audio] AudioContext resume failed:', e);
-                                // Try to play anyway
-                                wavesurferStore[callId].play();
-                                this.textContent = 'Pause';
-                            });
-                        } else {
-                            wavesurferStore[callId].play();
-                            this.textContent = 'Pause';
-                        }
-                    } else {
-                        wavesurferStore[callId].play();
-                        this.textContent = 'Pause';
-                    }
+                    // Manual play takes over the shared audio channel: whatever else
+                    // is playing (map, Live Feed, history list) stops, and queued
+                    // automatic plays resume after this one ends or is paused.
+                    const ws = wavesurferStore[callId];
+                    const done = CallAudio.interrupt(callId, () => ws.pause());
+                    playWaveSurferUntilDone(ws, done, callId);
                 }
             });
         }
+
+        attachRecorderControls(wavesurferStore[callId], containerElement, controlsContainer, callId);
 
         // WaveSurfer event listeners
         wavesurferStore[callId].on('ready', function() {
@@ -3056,52 +3443,6 @@ function initWaveSurfer(callId, audioUrl, wavesurferStore, onReadyCallback, cont
 
     } catch (error) {
         console.error(`Failed to initialize WaveSurfer for callId ${callId}:`, error);
-    }
-}
-
-// Modified to accept the specific wavesurfer store
-function playWaveSurferAudio(callId, wavesurferStore, marker = null) {
-    if (!wavesurferStore || !wavesurferStore[callId]) {
-        console.error(`WaveSurfer instance not found for callId ${callId} in the provided store.`);
-        return;
-    }
-    try {
-        // Get the wavesurfer instance
-        const wsInstance = wavesurferStore[callId];
-        
-        // Ensure the volume is set correctly before playing
-        wsInstance.setVolume(globalVolumeLevel);
-        console.log(`[VOLUME] Set volume for wavesurfer ${callId} to ${globalVolumeLevel} before playing`);
-        
-        // Ensure audio context is running (required after user interaction)
-        if (wsInstance.backend && typeof wsInstance.backend.getAudioContext === 'function') {
-            const audioContext = wsInstance.backend.getAudioContext();
-            if (audioContext.state === 'suspended') {
-                audioContext.resume().then(() => {
-                    console.log('AudioContext resumed for playing');
-                    wsInstance.play();
-                }).catch(e => console.error('AudioContext resume failed:', e));
-            } else {
-                wsInstance.play();
-            }
-        } else {
-            wsInstance.play(); // Fallback if context check fails
-        }
-
-        const controlsContainer = document.querySelector(`.talkgroup-list-item[data-call-id="${callId}"], .custom-popup`); // Find the right container
-        if (controlsContainer) {
-            const playPauseButton = controlsContainer.querySelector(`.play-pause[data-call-id="${callId}"]`);
-            if (playPauseButton) {
-                playPauseButton.textContent = 'Pause';
-            }
-        }
-
-        if (marker) {
-            marker.shouldPlayAudio = false; // Mark as played if triggered from marker
-        }
-        console.log(`Audio played for callId: ${callId}`);
-    } catch (e) {
-        console.error(`Failed to play audio for callId ${callId}:`, e);
     }
 }
 
@@ -3471,8 +3812,15 @@ function pollForNewTalkgroupCalls(talkgroupId) {
                                    talkgroupModalWavesurfers, 
                                    () => { // Define the onReadyCallback inline here
                                        if (talkgroupModalAutoplay && isTalkgroupModalOpen && currentOpenTalkgroupId === talkgroupId) {
-                                            console.log(`[Autoplay] WaveSurfer ready for ${call.id}, attempting autoplay.`);
-                                            playWaveSurferAudio(call.id, talkgroupModalWavesurfers);
+                                            console.log(`[Autoplay] WaveSurfer ready for ${call.id}, queueing autoplay.`);
+                                            CallAudio.enqueue({
+                                                id: call.id,
+                                                start: (done) => {
+                                                    const ws = talkgroupModalWavesurfers[call.id];
+                                                    if (!ws || !isTalkgroupModalOpen) { done(); return; }
+                                                    return playWaveSurferUntilDone(ws, done, call.id);
+                                                },
+                                            });
                                        }
                                    }, 
                                    `tg-waveform-${call.id}`
@@ -3510,14 +3858,14 @@ function showNotification(message, type = 'success') {
     position: fixed;
     bottom: 20px;
     right: 20px;
-    background-color: ${type === 'success' ? 'var(--hover-color)' : '#330000'};
-    color: ${type === 'success' ? 'var(--text-color)' : '#ff0000'};
-    border: 1px solid ${type === 'success' ? 'var(--border-color)' : '#ff0000'};
+    background-color: ${type === 'success' ? 'var(--hover-color)' : 'var(--danger-bg)'};
+    color: ${type === 'success' ? 'var(--text-color)' : 'var(--danger-color)'};
+    border: 1px solid ${type === 'success' ? 'var(--border-color)' : 'var(--danger-color)'};
     padding: 15px 20px;
     border-radius: 4px;
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     z-index: 2000;
-    box-shadow: 0 0 10px ${type === 'success' ? 'rgba(0, 255, 0, 0.3)' : 'rgba(255, 0, 0, 0.3)'};
+    box-shadow: 0 0 10px ${type === 'success' ? 'rgba(var(--primary-rgb), 0.3)' : 'rgba(var(--danger-rgb), 0.3)'};
     animation: notificationSlideIn 0.3s ease-out;
   `;
   
@@ -3558,7 +3906,8 @@ function setupUserManagement() {
     
     // Close dropdown when clicking outside
     window.addEventListener('click', function(e) {
-        if (!e.target.matches('#user-menu-btn')) {
+        // The theme picker lives in this menu; using it shouldn't close the menu
+        if (!e.target.matches('#user-menu-btn') && !e.target.closest('.theme-picker-row')) {
             if (dropdownContent && dropdownContent.classList.contains('show')) {
                 dropdownContent.classList.remove('show');
             }
@@ -4053,7 +4402,7 @@ function loadSummary() {
       const ticker = document.querySelector('.ticker');
       if (ticker) {
         // Display error message within the ticker for visibility
-        ticker.innerHTML = '<div class="ticker-item" style="color: #ff3333;">Error loading summary information</div>';
+        ticker.innerHTML = '<div class="ticker-item" style="color: var(--danger-color);">Error loading summary information</div>';
         // Stop any running animation
         ticker.style.animation = 'none';
       }
@@ -4578,8 +4927,24 @@ function attemptLiveFeedRetry(callId, itemElement, retryCount, removalTimeoutId)
 }
 
 // playLiveAudio function (use window.audioContext)
+// Live Feed audio waits its turn on the shared channel (no overlapping calls)
 function playLiveAudio(call) {
-    // --- Ensure AudioContext exists --- 
+    if (!call || !call.id) return;
+    CallAudio.enqueue({ id: call.id, start: (done) => playLiveAudioNow(call, done) });
+}
+
+function playLiveAudioNow(call, done) {
+    let source = null;
+    let stopped = false;
+    let finished = false;
+    const finish = () => { if (!finished) { finished = true; done(); } };
+    const stop = () => {
+        stopped = true;
+        try { if (source) source.stop(); } catch (e) { /* not started */ }
+        finish();
+    };
+
+    // --- Ensure AudioContext exists ---
     if (!window.audioContext) {
         try {
             const AudioContext = window.AudioContext || window.webkitAudioContext;
@@ -4588,7 +4953,8 @@ function playLiveAudio(call) {
             initGlobalGainNode(); 
         } catch (e) {
              console.error('Failed to create AudioContext:', e);
-             return; // Cannot proceed without context
+             finish();
+             return stop; // Cannot proceed without context
         }
     }
 
@@ -4613,8 +4979,10 @@ function playLiveAudio(call) {
             return window.audioContext.decodeAudioData(arrayBuffer); 
         })
         .then(audioBuffer => {
-            const source = window.audioContext.createBufferSource(); 
+            if (stopped) return; // interrupted while loading
+            source = window.audioContext.createBufferSource();
             source.buffer = audioBuffer;
+            source.onended = finish; // next queued call starts when this one ends
             
             if (window.globalGainNode) {
                 const destinationNode = window.globalGainNode;
@@ -4631,7 +4999,9 @@ function playLiveAudio(call) {
         })
         .catch(error => {
             console.error(`Error playing live audio for call ID ${call.id}:`, error);
+            finish();
         });
+    return stop;
 }
 
 // NOTE: Removed empty stub re-definitions of setupGlobalVolumeControl() and

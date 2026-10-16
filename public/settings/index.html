@@ -5,11 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Scanner Map - Settings</title>
   <link rel="icon" href="/favicon.ico" />
+  <!-- Same theme as the map (shared choice); applied before first paint -->
+  <script src="/theme.js"></script>
   <link rel="stylesheet" href="/setup/setup.css" />
   <link rel="stylesheet" href="/settings/settings.css" />
   <style>
-    .nav-footer a { color: var(--primary); text-decoration: none; }
-    .nav-footer a:hover { text-decoration: underline; }
     .back-map-btn {
       display: block; width: 100%; text-align: center; box-sizing: border-box;
       margin: 0 0 18px; font-size: 15px;
@@ -27,6 +27,9 @@
         </div>
       </div>
       <a href="/" class="btn btn-primary back-map-btn">🗺️ Back to Map</a>
+      <label class="theme-picker-row">Theme
+        <select data-theme-picker aria-label="Theme"></select>
+      </label>
       <ol id="step-nav" class="step-nav"></ol>
       <div class="nav-footer">v2.0 &middot; <a href="/">← Back to map</a></div>
     </aside>

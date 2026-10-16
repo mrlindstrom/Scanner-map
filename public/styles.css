@@ -1,15 +1,8 @@
 @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
 
-:root {
-    --primary-color: #00ff00;
-    --background-color: #000000;
-    --text-color: #00ff00;
-    --border-color: #00ff00;
-    --hover-color: #003300;
-}
 
 body, html {
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     margin: 0;
     padding: 0;
     height: 100%;
@@ -29,10 +22,10 @@ body, html {
     left: 0px;
     right: 0px;
     z-index: 1000;
-    background: rgba(0, 0, 0, 0.7);
+    background: rgba(var(--panel-rgb), 0.7);
     padding: 10px;
     border-radius: 4px;
-    box-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
+    box-shadow: 0 0 10px rgba(var(--primary-rgb), 0.5);
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -64,7 +57,7 @@ body, html {
     border: 1px solid var(--border-color);
     border-radius: 4px;
     font-size: 14px;
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     cursor: pointer;
     transition: all 0.3s;
 }
@@ -78,7 +71,7 @@ body, html {
     border: 1px solid var(--border-color);
     border-radius: 4px;
     font-size: 14px;
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
 }
 
 #control-panel input[type="text"]::placeholder {
@@ -125,7 +118,7 @@ body, html {
     border-radius: 4px;
     cursor: pointer;
     font-size: 14px;
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     transition: all 0.3s;
     margin-right: 5px;
 }
@@ -177,7 +170,7 @@ body, html {
 .leaflet-control-zoom {
     border: 1px solid var(--border-color) !important;
     border-radius: 4px;
-    box-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
+    box-shadow: 0 0 10px rgba(var(--primary-rgb), 0.5);
 }
 /* Hide Leaflet Scale (Globally) */
 .leaflet-control-scale {
@@ -190,7 +183,7 @@ body, html {
     /* background-color: var(--background-color);
     border: 2px solid var(--border-color);
     border-radius: 4px;
-    box-shadow: 0 0 10px rgba(0, 255, 0, 0.5); */
+    box-shadow: 0 0 10px rgba(var(--primary-rgb), 0.5); */
 }
 .leaflet-control-custom-zoom a {
     /* display: block;
@@ -215,7 +208,7 @@ body, html {
 .marker-cluster-small div,
 .marker-cluster-medium div,
 .marker-cluster-large div {
-    background-color: rgba(0, 0, 0, 0.6);
+    background-color: rgba(var(--panel-rgb), 0.6);
 }
 
 .marker-cluster div {
@@ -235,7 +228,7 @@ body, html {
 
 .waveform {
     margin-top: 10px;
-    background-color: rgba(0, 255, 0, 0.1);
+    background-color: rgba(var(--primary-rgb), 0.1);
     border: 1px solid var(--border-color);
 }
 
@@ -257,7 +250,7 @@ body, html {
     border-radius: 4px;
     cursor: pointer;
     font-size: 14px;
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     transition: all 0.3s;
     margin-right: 5px;
 }
@@ -294,7 +287,7 @@ body, html {
     background: var(--primary-color);
     cursor: pointer;
     border-radius: 50%;
-    border: 1px solid #000000; /* Changed border to black */
+    border: 1px solid var(--background-color); /* Changed border to black */
     margin-top: -5px; /* Adjusted margin-top */
 }
 
@@ -304,20 +297,20 @@ body, html {
     background: var(--primary-color);
     cursor: pointer;
     border-radius: 50%;
-    border: 1px solid #000000; /* Changed border to black */
+    border: 1px solid var(--background-color); /* Changed border to black */
 }
 
 /* Track styles */
 .volume::-webkit-slider-runnable-track, #heatmap-intensity::-webkit-slider-runnable-track {
     height: 8px;
-    background: rgba(0, 255, 0, 0.1); /* Lighter track background */
+    background: rgba(var(--primary-rgb), 0.1); /* Lighter track background */
     border-radius: 4px;
     border: 1px solid var(--border-color); /* Keep border */
 }
 
 .volume::-moz-range-track, #heatmap-intensity::-moz-range-track {
     height: 8px;
-    background: rgba(0, 255, 0, 0.1); /* Lighter track background */
+    background: rgba(var(--primary-rgb), 0.1); /* Lighter track background */
     border-radius: 4px;
     border: 1px solid var(--border-color); /* Keep border */
 }
@@ -333,7 +326,7 @@ body, html {
 
 .volume::-ms-fill-lower,
 #heatmap-intensity::-ms-fill-lower {
-    background: rgba(0, 255, 0, 0.1); /* Lighter track background */
+    background: rgba(var(--primary-rgb), 0.1); /* Lighter track background */
     border: 1px solid var(--border-color);
     border-radius: 4px;
 }
@@ -351,7 +344,7 @@ body, html {
     background: var(--primary-color);
     cursor: pointer;
     border-radius: 50%;
-    border: 1px solid #000000; /* Changed border to black */
+    border: 1px solid var(--background-color); /* Changed border to black */
     margin-top: 0;
 }
 
@@ -370,7 +363,7 @@ body, html {
     width: 100%;
     height: 100%;
     overflow: auto;
-    background-color: rgba(0,0,0,0.4);
+    background-color: rgba(var(--panel-rgb), 0.4);
 }
 
 .modal-content {
@@ -381,7 +374,7 @@ body, html {
     width: 80%;
     max-width: 500px;
     color: var(--text-color);
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
 }
 
 .modal-content h2 {
@@ -463,13 +456,13 @@ body, html {
     left: 50%;
     transform: translateX(-50%);
     top: 130px !important; /* Position below summary bar and sidebar */
-    background-color: rgba(0, 0, 0, 1);
+    background-color: rgba(var(--panel-rgb), 1);
     color: var(--text-color);
     border: 1px solid var(--border-color);
     border-radius: 4px;
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     z-index: 1001;
-    box-shadow: 0 0 15px rgba(0, 255, 0, 0.5);
+    box-shadow: 0 0 15px rgba(var(--primary-rgb), 0.5);
     transition: opacity 0.3s ease-in-out, top 0.3s ease-in-out;
     padding: 10px 20px;
     font-size: 18px;
@@ -505,14 +498,14 @@ body, html {
     left: 200px; /* Position to the right of the sidebar */
     right: 10px; /* Adjust right padding */
     height: 40px;
-    background-color: rgba(0, 0, 0, 0.8);
+    background-color: rgba(var(--panel-rgb), 0.8);
     color: var(--text-color);
     border: 1px solid var(--border-color);
     border-radius: 4px;
-    box-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
+    box-shadow: 0 0 10px rgba(var(--primary-rgb), 0.5);
     z-index: 998; /* Below sidebar */
     overflow: hidden; /* Crucial: Hide overflowing content */
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     transition: left 0.3s ease-in-out;
     display: flex; /* Use flexbox for vertical centering */
     align-items: center; /* Vertically center content */
@@ -539,15 +532,15 @@ body, html {
     padding: 0 25px; /* Horizontal spacing between items/sections */
     color: var(--text-color);
     font-size: 20px; /* Desktop font size */
-    text-shadow: 0 0 5px rgba(0, 255, 0, 0.5);
+    text-shadow: 0 0 5px rgba(var(--primary-rgb), 0.5);
     vertical-align: middle; /* Ensure vertical alignment */
  }
 
  /* Style for the highlighted talk groups */
  .summary-highlight {
-    color: #00ccff; /* Blue color */
+    color: var(--accent-color); /* Blue color */
     font-weight: bold;
-    text-shadow: 0 0 8px rgba(0, 204, 255, 0.7); /* Blue glow */
+    text-shadow: 0 0 8px rgba(var(--accent-rgb), 0.7); /* Blue glow */
     margin: 0 3px; /* Add slight spacing */
  }
 
@@ -579,13 +572,13 @@ body, html {
       left: 0px;
       top: 70px; /* Position below the control panel */
       width: 180px;
-      background-color: rgba(0, 0, 0, 0.8);
+      background-color: rgba(var(--panel-rgb), 0.8);
       color: var(--text-color);
       border: 1px solid var(--border-color);
       border-radius: 0 4px 4px 0; /* Rounded corners on the right */
-      box-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
+      box-shadow: 0 0 10px rgba(var(--primary-rgb), 0.5);
       z-index: 999;
-      font-family: 'Share Tech Mono', monospace;
+      font-family: var(--font-family);
       padding: 10px;
       overflow-y: auto;
       max-height: calc(100vh - 120px); /* Adjust height */
@@ -606,7 +599,7 @@ body, html {
       justify-content: space-between;
       align-items: center;
       padding: 8px 5px;
-      border-bottom: 1px solid rgba(0, 255, 0, 0.2);
+      border-bottom: 1px solid rgba(var(--primary-rgb), 0.2);
       cursor: pointer;
       transition: all 0.2s;
     }
@@ -616,9 +609,9 @@ body, html {
     }
 
     .category-item.active {
-      background-color: rgba(0, 50, 0, 0.8);
+      background-color: rgba(var(--hover-rgb), 0.8);
       border-left: 3px solid var(--primary-color);
-      box-shadow: inset 0 0 10px rgba(0, 255, 0, 0.3);
+      box-shadow: inset 0 0 10px rgba(var(--primary-rgb), 0.3);
       padding-left: 7px; /* Adjust padding for border */
     }
 
@@ -648,7 +641,7 @@ body, html {
 
     .leaflet-control-attribution {
         z-index: 996 !important; /* Lower z-index than control panel */
-        background-color: rgba(0, 0, 0, 0.7) !important;
+        background-color: rgba(var(--panel-rgb), 0.7) !important;
         color: var(--text-color) !important;
         border: 1px solid var(--border-color);
         font-size: 10px !important;
@@ -670,9 +663,9 @@ body, html {
     border: 1px solid var(--border-color);
     border-radius: 4px;
     font-size: 14px;
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     cursor: pointer;
-    box-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
+    box-shadow: 0 0 10px rgba(var(--primary-rgb), 0.5);
     transition: all 0.3s;
 }
 
@@ -710,7 +703,7 @@ body, html {
         left: 0;
         right: 0;
         top: auto;
-        background: rgba(0, 0, 0, 0.9);
+        background: rgba(var(--panel-rgb), 0.9);
         padding: 10px; /* Padding around the grid */
         box-sizing: border-box;
         display: grid; /* USE GRID */
@@ -855,13 +848,13 @@ body, html {
         right: 10px;
         height: 50px; /* Mobile height */
         z-index: 1001; /* Keep high z-index */
-        background-color: rgba(0, 0, 0, 0.8);
+        background-color: rgba(var(--panel-rgb), 0.8);
         color: var(--text-color);
         border: 1px solid var(--border-color);
         border-radius: 4px;
-        box-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
+        box-shadow: 0 0 10px rgba(var(--primary-rgb), 0.5);
         overflow: hidden; /* Ensure overflow is hidden */
-        font-family: 'Share Tech Mono', monospace;
+        font-family: var(--font-family);
         display: flex; /* Ensure flex is used for centering */
         align-items: center; /* Vertically center content */
      }
@@ -884,16 +877,16 @@ body, html {
         padding: 0 15px; /* Mobile padding */
         font-size: 21px; /* Mobile font size */
         color: var(--text-color); /* Ensure base color */
-        text-shadow: 0 0 5px rgba(0, 255, 0, 0.5); /* Ensure base shadow */
+        text-shadow: 0 0 5px rgba(var(--primary-rgb), 0.5); /* Ensure base shadow */
         vertical-align: middle;
 		line-height: 40px;
      }
 
      /* Explicitly define summary highlight for mobile to avoid overrides */
      .summary-highlight {
-        color: #00ccff; /* Blue color */
+        color: var(--accent-color); /* Blue color */
         font-weight: bold; /* Ensure bold */
-        text-shadow: 0 0 8px rgba(0, 204, 255, 0.7); /* Blue glow */
+        text-shadow: 0 0 8px rgba(var(--accent-rgb), 0.7); /* Blue glow */
         margin: 0 3px; /* Ensure spacing */
      }
      /* --- End Ticker Mobile Styles --- */
@@ -924,9 +917,9 @@ body, html {
         /* Adjust max/height based on new control panel height */
         max-height: calc(100vh - 50px - 180px);
         height: calc(100vh - 50px - 180px);
-        box-shadow: 0 0 15px rgba(0, 255, 0, 0.6);
+        box-shadow: 0 0 15px rgba(var(--primary-rgb), 0.6);
         z-index: 1000; /* Below toggle button, above map */
-        background-color: rgba(0, 0, 0, 0.95); /* More opaque */
+        background-color: rgba(var(--panel-rgb), 0.95); /* More opaque */
         border: 2px solid var(--border-color);
         padding: 10px; /* Add padding for content */
         box-sizing: border-box;
@@ -954,7 +947,7 @@ body, html {
 		display: flex;
 		justify-content: space-between;
 		align-items: center;
-		border-bottom: 1px solid rgba(0, 255, 0, 0.2);
+		border-bottom: 1px solid rgba(var(--primary-rgb), 0.2);
 		cursor: pointer;
 		transition: all 0.2s;
       }
@@ -962,13 +955,13 @@ body, html {
         background-color: var(--hover-color); /* Ensure hover works */
        }
       .category-item.active {
-        background-color: rgba(0, 50, 0, 0.8); /* Darker green */
+        background-color: rgba(var(--hover-rgb), 0.8); /* Darker green */
         border-left: 3px solid var(--primary-color); /* Green indicator */
-        box-shadow: inset 0 0 10px rgba(0, 255, 0, 0.3); /* Inner glow */
+        box-shadow: inset 0 0 10px rgba(var(--primary-rgb), 0.3); /* Inner glow */
         padding-left: 5px; /* Adjust padding for the border */
       }
       .category-item.active:hover {
-        background-color: rgba(0, 50, 0, 0.8); /* Keep active background on hover */
+        background-color: rgba(var(--hover-rgb), 0.8); /* Keep active background on hover */
        }
 
        /* Mobile Category Font Size Increase */
@@ -1134,7 +1127,7 @@ input[type="time"] {
     border: 1px solid var(--border-color);
     border-radius: 4px;
     font-size: 14px;
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     cursor: pointer;
     transition: all 0.3s;
     position: relative;
@@ -1174,12 +1167,12 @@ input[type="time"] {
     color: var(--background-color);
 }
 .modal-buttons button.cancel-btn {
-    background-color: #330000;
-    color: #ff0000;
-    border: 1px solid #ff0000;
+    background-color: var(--danger-bg);
+    color: var(--danger-color);
+    border: 1px solid var(--danger-color);
 }
 .modal-buttons button.cancel-btn:hover {
-    background-color: #ff0000;
+    background-color: var(--danger-color);
     color: var(--background-color);
 }
 
@@ -1204,13 +1197,13 @@ input[type="time"] {
 
 @keyframes pulse {
     0% {
-        box-shadow: 0 0 0 0 rgba(0, 255, 0, 0.4);
+        box-shadow: 0 0 0 0 rgba(var(--primary-rgb), 0.4);
     }
     70% {
-        box-shadow: 0 0 0 20px rgba(0, 255, 0, 0);
+        box-shadow: 0 0 0 20px rgba(var(--primary-rgb), 0);
     }
     100% {
-        box-shadow: 0 0 0 0 rgba(0, 255, 0, 0);
+        box-shadow: 0 0 0 0 rgba(var(--primary-rgb), 0);
     }
 }
 
@@ -1256,7 +1249,7 @@ input[type="time"] {
     left: 0;
     width: 100%;
     height: 100%;
-    background-color: rgba(0, 0, 0, 0.8);
+    background-color: rgba(var(--panel-rgb), 0.8);
     display: flex;
     justify-content: center;
     align-items: center;
@@ -1267,7 +1260,7 @@ input[type="time"] {
 .correction-modal .modal-content {
     background-color: var(--background-color);
     border: 1px solid var(--border-color);
-    box-shadow: 0 0 20px rgba(0, 255, 0, 0.3);
+    box-shadow: 0 0 20px rgba(var(--primary-rgb), 0.3);
     padding: 20px;
     max-width: 400px;
     width: 90%;
@@ -1287,7 +1280,7 @@ input[type="time"] {
     color: var(--text-color);
     border: 1px solid var(--border-color);
     border-radius: 4px;
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     cursor: pointer;
     transition: all 0.3s;
 }
@@ -1300,14 +1293,14 @@ input[type="time"] {
 
 /* Delete button specific styling */
 .correction-modal #delete-marker {
-    border-color: #ff3333;
-    color: #ff3333;
+    border-color: var(--danger-color);
+    color: var(--danger-color);
 }
 
 .correction-modal #delete-marker:hover {
-    background-color: #ff3333;
+    background-color: var(--danger-color);
     color: var(--background-color);
-    box-shadow: 0 0 10px #ff3333;
+    box-shadow: 0 0 10px var(--danger-color);
 }
 
 /* Relocation Banner */
@@ -1316,11 +1309,11 @@ input[type="time"] {
     top: 0;
     left: 0;
     right: 0;
-    background-color: rgba(0, 0, 0, 0.9);
+    background-color: rgba(var(--panel-rgb), 0.9);
     color: var(--text-color);
     text-align: center;
     padding: 15px;
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     border-bottom: 2px solid var(--primary-color);
     box-shadow: 0 0 10px var(--primary-color);
     z-index: 2000;
@@ -1328,7 +1321,7 @@ input[type="time"] {
 }
 
 .relocation-banner button {
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     transition: all 0.3s ease;
     border: 1px solid var(--primary-color);
     background-color: var(--background-color);
@@ -1364,7 +1357,7 @@ input[type="time"] {
     right: 20px;
     padding: 12px 20px;
     border-radius: 4px;
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     z-index: 2000;
     animation: notificationSlideIn 0.3s ease-out;
     transition: all 0.3s ease-out;
@@ -1464,7 +1457,7 @@ input[type="time"] {
     text-align: center;
     width: auto;
     min-width: 80px;
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
 }
 
 /* Timestamp container styles */
@@ -1509,7 +1502,7 @@ input[type="time"] {
     text-align: center;
     width: auto;
     min-width: 80px;
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
 }
 
 /* Mobile responsiveness for popup links */
@@ -1539,7 +1532,7 @@ input[type="time"] {
     position: absolute;
     background-color: var(--background-color);
     min-width: 160px;
-    box-shadow: 0 0 10px rgba(0, 255, 0, 0.5);
+    box-shadow: 0 0 10px rgba(var(--primary-rgb), 0.5);
     border: 1px solid var(--border-color);
     z-index: 1002;
     border-radius: 4px;
@@ -1552,7 +1545,7 @@ input[type="time"] {
     padding: 12px 16px;
     text-decoration: none;
     display: block;
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     transition: all 0.3s;
 }
 
@@ -1581,7 +1574,7 @@ input[type="time"] {
     background-color: var(--background-color);
     border: 1px solid var(--border-color);
     color: var(--text-color);
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     border-radius: 4px;
     box-sizing: border-box; /* Include padding in width */
 }
@@ -1616,20 +1609,20 @@ input[type="time"] {
 }
 
 .delete-user-btn {
-    background-color: #330000;
-    color: #ff0000;
-    border: 1px solid #ff0000;
+    background-color: var(--danger-bg);
+    color: var(--danger-color);
+    border: 1px solid var(--danger-color);
     padding: 5px 10px;
     cursor: pointer;
     border-radius: 4px;
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     transition: all 0.3s;
 }
 
 .delete-user-btn:hover {
-    background-color: #ff0000;
+    background-color: var(--danger-color);
     color: var(--background-color);
-    box-shadow: 0 0 10px #ff0000;
+    box-shadow: 0 0 10px var(--danger-color);
 }
 
 /* Mobile responsiveness for user management dropdown */
@@ -1643,7 +1636,7 @@ input[type="time"] {
         transform: translate(-50%, -50%);
         width: 90%;
         max-width: 300px;
-        box-shadow: 0 0 20px rgba(0, 255, 0, 0.5);
+        box-shadow: 0 0 20px rgba(var(--primary-rgb), 0.5);
     }
 
     .user-item {
@@ -1687,20 +1680,20 @@ input[type="time"] {
 }
 
 .terminate-session-btn {
-    background-color: #330000;
-    color: #ff0000;
-    border: 1px solid #ff0000;
+    background-color: var(--danger-bg);
+    color: var(--danger-color);
+    border: 1px solid var(--danger-color);
     padding: 5px 10px;
     cursor: pointer;
     border-radius: 4px;
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     transition: all 0.3s;
 }
 
 .terminate-session-btn:hover {
-    background-color: #ff0000;
+    background-color: var(--danger-color);
     color: var(--background-color);
-    box-shadow: 0 0 10px #ff0000;
+    box-shadow: 0 0 10px var(--danger-color);
 }
 
 .current-session {
@@ -1726,7 +1719,7 @@ input[type="time"] {
     border: 1px solid var(--border-color);
     padding: 8px;
     border-radius: 4px;
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     width: 100%;
     appearance: none; /* Remove default arrow */
     -webkit-appearance: none;
@@ -1747,7 +1740,7 @@ input[type="time"] {
     margin-right: 10px;
     font-weight: bold;
     color: var(--text-color);
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     display: block; /* Make label take full width */
     margin-bottom: 5px;
 }
@@ -1789,7 +1782,7 @@ input[type="time"] {
 /* Category Badge Style */
 .category-badge {
   background-color: var(--hover-color);
-  color: #00ccff;
+  color: var(--accent-color);
   padding: 2px 6px;
   border-radius: 10px;
   font-size: 12px;
@@ -1801,7 +1794,7 @@ input[type="time"] {
 /* Pulsing icon CSS */
 .leaflet-pulsing-icon {
     border-radius: 1%;
-    box-shadow: 0px 0px 0px 0 rgba(0,0,0,.75);
+    box-shadow: 0px 0px 0px 0 rgba(var(--shadow-rgb), .75);
     background-color: transparent !important; /* Make the center transparent */
 }
 
@@ -1877,7 +1870,7 @@ input[type="time"] {
     margin-bottom: 5px;
     cursor: pointer;
     color: var(--text-color);
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     transition: all 0.3s;
     font-size: 12px; /* Slightly smaller font */
 }
@@ -1929,11 +1922,11 @@ input[type="time"] {
   top: 0;
   left: 0;
   right: 0;
-  background-color: rgba(0, 0, 0, 0.9);
+  background-color: rgba(var(--panel-rgb), 0.9);
   color: var(--text-color);
   text-align: center;
   padding: 15px;
-  font-family: 'Share Tech Mono', monospace;
+  font-family: var(--font-family);
   border-bottom: 2px solid var(--primary-color);
   box-shadow: 0 0 10px var(--primary-color);
   z-index: 2000;
@@ -1944,11 +1937,11 @@ input[type="time"] {
 place-autocomplete-element::part(input) {
     width: 100%;
     padding: 8px 10px;
-    background-color: #000 !important;
-    color: #00ff00 !important;
-    border: 1px solid #00ff00 !important;
+    background-color: var(--background-color) !important;
+    color: var(--primary-color) !important;
+    border: 1px solid var(--primary-color) !important;
     border-radius: 4px !important;
-    font-family: 'Share Tech Mono', monospace !important;
+    font-family: var(--font-family) !important;
     font-size: 14px !important;
     box-sizing: border-box !important;
 }
@@ -1963,23 +1956,23 @@ place-autocomplete-element::part(icon) {
 .pac-container, .gmp-pac-container {
   /* This container is added to the body, so we style it globally */
   z-index: 2001 !important;
-  background-color: #0d0d0d;
+  background-color: var(--surface-color);
   border: 1px solid var(--primary-color);
   border-radius: 4px;
-  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.5);
-  font-family: 'Share Tech Mono', monospace;
+  box-shadow: 0 4px 10px rgba(var(--shadow-rgb), 0.5);
+  font-family: var(--font-family);
 }
 
 .pac-item, .gmp-pac-item {
   padding: 10px;
   color: var(--text-color);
-  border-bottom: 1px solid rgba(0, 255, 0, 0.1);
+  border-bottom: 1px solid rgba(var(--primary-rgb), 0.1);
   transition: all 0.2s;
-  background-color: #0d0d0d;
+  background-color: var(--surface-color);
 }
 
 .pac-item:hover, .gmp-pac-item:hover {
-  background-color: rgba(0, 255, 0, 0.1);
+  background-color: rgba(var(--primary-rgb), 0.1);
   cursor: pointer;
 }
 
@@ -2002,7 +1995,7 @@ place-autocomplete-element::part(icon) {
 .pac-container::-webkit-scrollbar-thumb, .gmp-pac-container::-webkit-scrollbar-thumb {
   background-color: var(--primary-color);
   border-radius: 4px;
-  border: 1px solid rgba(0, 255, 0, 0.3);
+  border: 1px solid rgba(var(--primary-rgb), 0.3);
 }
 
 /* Mobile responsiveness for address search */
@@ -2042,28 +2035,28 @@ place-autocomplete-element::part(icon) {
   top: 100%;
   left: 0;
   right: 0;
-  background-color: #000;
-  border: 1px solid #00ff00;
+  background-color: var(--background-color);
+  border: 1px solid var(--primary-color);
   border-top: none;
   border-radius: 0 0 4px 4px;
   max-height: 200px;
   overflow-y: auto;
   z-index: 1000;
-  box-shadow: 0 4px 8px rgba(0, 255, 0, 0.3);
+  box-shadow: 0 4px 8px rgba(var(--primary-rgb), 0.3);
 }
 
 .locationiq-item {
   padding: 8px 12px;
   cursor: pointer;
   border-bottom: 1px solid #333;
-  color: #00ff00;
-  font-family: 'Share Tech Mono', monospace;
+  color: var(--primary-color);
+  font-family: var(--font-family);
   font-size: 12px;
   transition: background-color 0.2s ease;
 }
 
 .locationiq-item:hover {
-  background-color: #003300;
+  background-color: var(--hover-color);
 }
 
 .locationiq-item:last-child {
@@ -2075,11 +2068,11 @@ place-autocomplete-element::part(icon) {
 }
 
 .locationiq-dropdown::-webkit-scrollbar-track {
-  background: #000;
+  background: var(--background-color);
 }
 
 .locationiq-dropdown::-webkit-scrollbar-thumb {
-  background: #00ff00;
+  background: var(--primary-color);
   border-radius: 4px;
 }
 
@@ -2132,7 +2125,7 @@ place-autocomplete-element::part(icon) {
     background-color: var(--background-color);
     border: 2px solid var(--border-color);
     border-radius: 4px;
-    box-shadow: 0 1px 5px rgba(0,0,0,0.4); /* Match Leaflet's default control shadow */
+    box-shadow: 0 1px 5px rgba(var(--shadow-rgb), 0.4); /* Match Leaflet's default control shadow */
     transition: background-color 0.3s ease, border-color 0.3s ease;
 }
 
@@ -2197,19 +2190,19 @@ place-autocomplete-element::part(icon) {
 }
 
 .talkgroup-list::-webkit-scrollbar-track {
-  background: rgba(0, 0, 0, 0.3);
+  background: rgba(var(--panel-rgb), 0.3);
   border-radius: 5px;
 }
 
 .talkgroup-list::-webkit-scrollbar-thumb {
   background-color: var(--primary-color);
   border-radius: 5px;
-  border: 2px solid rgba(0, 0, 0, 0.3);
+  border: 2px solid rgba(var(--panel-rgb), 0.3);
 }
 
 .talkgroup-list {
   scrollbar-width: thin;
-  scrollbar-color: var(--primary-color) rgba(0, 0, 0, 0.3);
+  scrollbar-color: var(--primary-color) rgba(var(--panel-rgb), 0.3);
 }
 
 .talkgroup-list-item {
@@ -2217,12 +2210,12 @@ place-autocomplete-element::part(icon) {
   border-radius: 4px;
   padding: 10px 15px;
   margin-bottom: 10px;
-  background-color: rgba(0, 51, 0, 0.1); /* Subtle green background */
+  background-color: rgba(var(--hover-rgb), 0.1); /* Subtle green background */
   transition: background-color 0.3s;
 }
 
 .talkgroup-list-item:hover {
-  background-color: rgba(0, 51, 0, 0.2);
+  background-color: rgba(var(--hover-rgb), 0.2);
 }
 
 .talkgroup-item-timestamp {
@@ -2280,8 +2273,8 @@ place-autocomplete-element::part(icon) {
 }
 
 @keyframes newItemFadeIn {
-  from { background-color: rgba(0, 255, 0, 0.3); }
-  to { background-color: rgba(0, 51, 0, 0.1); }
+  from { background-color: rgba(var(--primary-rgb), 0.3); }
+  to { background-color: rgba(var(--hover-rgb), 0.1); }
 }
 
 /* Mobile Adjustments for Talkgroup Modal */
@@ -2312,7 +2305,7 @@ place-autocomplete-element::part(icon) {
     border-radius: 4px;
     cursor: pointer;
     font-size: 14px;
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     transition: all 0.3s;
     margin-right: 5px;
     text-align: center; /* Center text */
@@ -2345,7 +2338,7 @@ place-autocomplete-element::part(icon) {
   text-align: center;
   margin-bottom: 10px;
   padding-bottom: 10px;
-  border-bottom: 1px solid rgba(0, 255, 0, 0.2);
+  border-bottom: 1px solid rgba(var(--primary-rgb), 0.2);
 }
 
 .talkgroup-modal-controls label {
@@ -2402,11 +2395,11 @@ place-autocomplete-element::part(icon) {
 #live-feed-search { /* Style for search input moved here */
     width: 100%;
     padding: 8px 10px;
-    background-color: #000;
-    color: #00ff00;
-    border: 1px solid #00ff00;
+    background-color: var(--background-color);
+    color: var(--primary-color);
+    border: 1px solid var(--primary-color);
     border-radius: 4px;
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     font-size: 14px;
     box-sizing: border-box;
     margin-bottom: 15px;
@@ -2419,8 +2412,8 @@ place-autocomplete-element::part(icon) {
     align-items: center; /* Vertically align */
     padding: 10px 0;
     margin-bottom: 15px;
-    border-top: 1px solid rgba(0, 255, 0, 0.2);
-    border-bottom: 1px solid rgba(0, 255, 0, 0.2);
+    border-top: 1px solid rgba(var(--primary-rgb), 0.2);
+    border-bottom: 1px solid rgba(var(--primary-rgb), 0.2);
 }
 
 .live-feed-master-controls label { /* Style for master control labels */
@@ -2443,7 +2436,7 @@ place-autocomplete-element::part(icon) {
   overflow-y: auto; /* Enable scrolling */
   padding-right: 10px; /* Space for scrollbar */
   margin-bottom: 15px;
-  border: 1px solid rgba(0, 255, 0, 0.2);
+  border: 1px solid rgba(var(--primary-rgb), 0.2);
   padding: 5px;
   min-height: 200px; /* Ensure it has some height */
 }
@@ -2454,19 +2447,19 @@ place-autocomplete-element::part(icon) {
 }
 
 #live-feed-talkgroup-list::-webkit-scrollbar-track { /* Style for scrollbar track */
-  background: rgba(0, 0, 0, 0.3);
+  background: rgba(var(--panel-rgb), 0.3);
   border-radius: 5px;
 }
 
 #live-feed-talkgroup-list::-webkit-scrollbar-thumb { /* Style for scrollbar thumb */
   background-color: var(--primary-color);
   border-radius: 5px;
-  border: 2px solid rgba(0, 0, 0, 0.3);
+  border: 2px solid rgba(var(--panel-rgb), 0.3);
 }
 
 #live-feed-talkgroup-list { /* Firefox scrollbar styles */
   scrollbar-width: thin;
-  scrollbar-color: var(--primary-color) rgba(0, 0, 0, 0.3);
+  scrollbar-color: var(--primary-color) rgba(var(--panel-rgb), 0.3);
 }
 
 .live-feed-tg-item { /* Style for individual talkgroup items */
@@ -2480,7 +2473,7 @@ place-autocomplete-element::part(icon) {
 }
 
 .live-feed-tg-item:hover { /* Hover style for talkgroup items */
-    background-color: rgba(0, 51, 0, 0.2);
+    background-color: rgba(var(--hover-rgb), 0.2);
 }
 
 .live-feed-tg-item input[type="checkbox"] { /* Style for talkgroup checkboxes */
@@ -2507,7 +2500,7 @@ place-autocomplete-element::part(icon) {
     color: var(--primary-color);
     padding: 8px 5px 4px 5px;
     margin-top: 10px;
-    border-bottom: 1px solid rgba(0, 255, 0, 0.3);
+    border-bottom: 1px solid rgba(var(--primary-rgb), 0.3);
     text-transform: uppercase;
     letter-spacing: 0.5px;
 }
@@ -2517,22 +2510,22 @@ place-autocomplete-element::part(icon) {
 }
 
 .live-feed-tg-item.selected {
-    background-color: rgba(0, 255, 0, 0.1);
+    background-color: rgba(var(--primary-rgb), 0.1);
     border-left: 3px solid var(--primary-color);
     padding-left: 2px;
 }
 
 .live-feed-tg-item.selected:hover {
-    background-color: rgba(0, 255, 0, 0.2);
+    background-color: rgba(var(--primary-rgb), 0.2);
 }
 
 .live-feed-truncated-message {
     font-size: 11px;
-    color: rgba(0, 255, 0, 0.7);
+    color: rgba(var(--primary-rgb), 0.7);
     padding: 8px 5px;
     text-align: center;
     font-style: italic;
-    border-top: 1px solid rgba(0, 255, 0, 0.2);
+    border-top: 1px solid rgba(var(--primary-rgb), 0.2);
     margin-top: 10px;
 }
 /* --- END Live Feed Setup Modal Styles --- */
@@ -2548,11 +2541,11 @@ place-autocomplete-element::part(icon) {
   width: 90%;
   max-width: 500px;
   max-height: 150px; /* Approx 5 lines */
-  background-color: rgba(0, 0, 0, 0.85);
+  background-color: rgba(var(--panel-rgb), 0.85);
   color: var(--text-color);
   border: 1px solid var(--border-color);
   border-radius: 4px;
-  box-shadow: 0 0 15px rgba(0, 255, 0, 0.5);
+  box-shadow: 0 0 15px rgba(var(--primary-rgb), 0.5);
   z-index: 997 !important; /* Add !important (just in case) */
   overflow: hidden; /* Prevent scrollbars */
   display: flex !important; /* Add !important */
@@ -2566,12 +2559,12 @@ place-autocomplete-element::part(icon) {
 .live-feed-item { /* Style for individual live feed items */
     padding: 4px 8px;
     margin-bottom: 3px; /* Space between items */
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     font-size: 14px;
     white-space: nowrap; /* Keep text on one line */
     overflow: hidden; /* Hide overflowing text */
     text-overflow: ellipsis; /* Keep ellipsis as default */
-    background-color: rgba(0, 20, 0, 0.7); /* Slight background */
+    background-color: rgba(var(--hover-rgb), 0.7); /* Slight background */
     border-radius: 3px;
     opacity: 1;
     transition: opacity 1.5s ease-out; /* Slower fade out */
@@ -2598,7 +2591,7 @@ place-autocomplete-element::part(icon) {
 }
 
 .live-feed-item strong { /* Style for talkgroup name highlight */
-    color: #00ccff; /* Highlight talkgroup name */
+    color: var(--accent-color); /* Highlight talkgroup name */
     margin-right: 5px;
 }
 
@@ -2794,7 +2787,7 @@ place-autocomplete-element::part(icon) {
     background-color: var(--background-color);
     border: 1px solid var(--border-color);
     color: var(--text-color);
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     border-radius: 4px;
     box-sizing: border-box;
 }
@@ -2804,8 +2797,8 @@ place-autocomplete-element::part(icon) {
     color: var(--text-color);
     margin-bottom: 20px;
     padding: 10px;
-    background-color: rgba(0, 255, 0, 0.1);
-    border: 1px solid rgba(0, 255, 0, 0.3);
+    background-color: rgba(var(--primary-rgb), 0.1);
+    border: 1px solid rgba(var(--primary-rgb), 0.3);
     border-radius: 4px;
     font-size: 14px;
     line-height: 1.4;
@@ -2832,7 +2825,7 @@ place-autocomplete-element::part(icon) {
 }
 
 .purge-talkgroup-item:hover {
-    background-color: rgba(0, 51, 0, 0.2);
+    background-color: rgba(var(--hover-rgb), 0.2);
 }
 
 .purge-talkgroup-item input[type="checkbox"] {
@@ -2866,7 +2859,7 @@ place-autocomplete-element::part(icon) {
     padding: 6px 12px;
     border-radius: 4px;
     cursor: pointer;
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     font-size: 12px;
     transition: all 0.3s;
 }
@@ -2887,7 +2880,7 @@ place-autocomplete-element::part(icon) {
     padding: 15px;
     border: 1px solid var(--border-color);
     border-radius: 4px;
-    background-color: rgba(0, 255, 0, 0.05);
+    background-color: rgba(var(--primary-rgb), 0.05);
 }
 
 .custom-time-inputs {
@@ -2920,7 +2913,7 @@ place-autocomplete-element::part(icon) {
     border-radius: 4px;
     background-color: var(--background-color);
     color: var(--text-color);
-    font-family: 'Share Tech Mono', monospace;
+    font-family: var(--font-family);
     font-size: 14px;
     transition: border-color 0.3s;
 }
@@ -2929,7 +2922,7 @@ place-autocomplete-element::part(icon) {
 .time-input-group input[type="time"]:focus {
     outline: none;
     border-color: var(--primary-color);
-    box-shadow: 0 0 0 2px rgba(0, 255, 0, 0.2);
+    box-shadow: 0 0 0 2px rgba(var(--primary-rgb), 0.2);
 }
 
 .time-input-group input[type="date"]:hover,
@@ -2967,3 +2960,94 @@ place-autocomplete-element::part(icon) {
     }
 }
 
+
+/* ---- Heatmap panel (app.js buildHeatmapPanel) ---- */
+.heatmap-panel {
+    width: 230px;
+    max-height: 60vh;
+    overflow-y: auto;
+    padding: 10px 12px;
+    background: rgba(var(--panel-rgb), 0.88);
+    color: var(--text-color);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    box-shadow: 0 0 10px rgba(var(--primary-rgb), 0.35);
+    font-family: var(--font-family);
+    font-size: 12px;
+}
+.heatmap-panel-title {
+    font-weight: bold;
+    font-size: 13px;
+    color: var(--primary-color);
+    margin-bottom: 8px;
+}
+.heatmap-panel-subtitle {
+    margin: 10px 0 4px;
+    font-weight: bold;
+    display: flex;
+    justify-content: space-between;
+    gap: 6px;
+}
+.heatmap-summary { font-weight: normal; opacity: 0.75; }
+.heatmap-row {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin-bottom: 6px;
+}
+.heatmap-row select,
+.heatmap-row input[type="range"] { width: 100%; }
+.heatmap-row select {
+    background: var(--surface-color);
+    color: var(--text-color);
+    border: 1px solid var(--border-color);
+    font-family: var(--font-family);
+    padding: 3px;
+}
+.heatmap-row input[type="range"] { accent-color: var(--primary-color); }
+.heatmap-hint { opacity: 0.75; font-size: 11px; margin: -2px 0 8px; line-height: 1.3; }
+.heatmap-legend {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    margin: 2px 0 8px;
+}
+.heatmap-legend i {
+    flex: 1;
+    height: 8px;
+    border-radius: 2px;
+    background: linear-gradient(90deg, #2b83ba, #abdda4, #ffffbf, #fdae61, #d7191c);
+}
+.heatmap-check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.heatmap-hotspots { list-style: none; margin: 0; padding: 0; }
+.heatmap-hotspot {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    padding: 5px 4px;
+    cursor: pointer;
+    border-top: 1px solid rgba(var(--primary-rgb), 0.2);
+}
+.heatmap-hotspot:hover,
+.heatmap-hotspot:focus { background: var(--hover-color); outline: none; }
+.hotspot-rank {
+    flex: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    background: var(--primary-color);
+    color: var(--background-color);
+    font-weight: bold;
+    font-size: 11px;
+}
+.hotspot-text { display: flex; flex-direction: column; line-height: 1.25; }
+.hotspot-text small { opacity: 0.8; }
+.heatmap-empty { opacity: 0.7; padding: 4px 0; }
+
+/* "Dim markers" while the heatmap is on */
+.heatmap-dim-markers .leaflet-marker-pane,
+.heatmap-dim-markers .leaflet-shadow-pane { opacity: 0.3; transition: opacity 0.2s; }
+.heatmap-dim-markers .leaflet-marker-pane:hover { opacity: 1; }

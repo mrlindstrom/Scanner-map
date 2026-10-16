@@ -9,6 +9,8 @@
 const fs = require('fs');
 const path = require('path');
 const winston = require('winston');
+require('winston-daily-rotate-file');
+const { consoleFormat } = require('./consoleFormat');
 
 const LOG_DIR = path.join(process.cwd(), 'logs');
 try {
@@ -19,37 +21,48 @@ try {
 
 const level = process.env.LOG_LEVEL || 'info';
 
-const consoleFormat = winston.format.combine(
-  winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-  winston.format.colorize(),
-  winston.format.printf(({ timestamp, level: lvl, message, module }) => {
-    const tag = module ? `[${module}] ` : '';
-    return `${timestamp} ${lvl}: ${tag}${message}`;
-  })
-);
-
 const fileFormat = winston.format.combine(
   winston.format.timestamp(),
   winston.format.json()
 );
 
+// Daily log files in ./logs, shared by every logger in the process:
+//   logs/combined-YYYY-MM-DD.log  (info and above)
+//   logs/error-YYYY-MM-DD.log     (errors only)
+// LOG_RETENTION_DAYS (default 3) sets how many days are kept; LOG_MAX_SIZE
+// (e.g. "50m", default unlimited) starts a numbered extra file when a day's log hits that size.
+const retentionDays = Math.max(1, parseInt(process.env.LOG_RETENTION_DAYS, 10) || 3);
+const maxSize = (process.env.LOG_MAX_SIZE || '').trim() || undefined;
+
+let fileTransports = null;
+
+/** The shared rotating file transports (created once per process). */
+function getFileTransports() {
+  if (!fileTransports) {
+    const rotating = (name, extra = {}) => new winston.transports.DailyRotateFile({
+      dirname: LOG_DIR,
+      filename: `${name}-%DATE%.log`,
+      datePattern: 'YYYY-MM-DD',
+      maxFiles: `${retentionDays}d`,
+      maxSize,
+      auditFile: path.join(LOG_DIR, `.${name}-audit.json`),
+      format: winston.format.json(),
+      ...extra,
+    });
+    fileTransports = [rotating('combined'), rotating('error', { level: 'error' })];
+    // Each logger that shares these adds a pipe; lift Node's default listener cap.
+    fileTransports.forEach((t) => t.setMaxListeners(0));
+  }
+  return fileTransports;
+}
+
 const baseLogger = winston.createLogger({
   level,
+  format: fileFormat,
   transports: [
-    new winston.transports.Console({ format: consoleFormat }),
-    new winston.transports.File({
-      filename: path.join(LOG_DIR, 'combined.log'),
-      format: fileFormat,
-      maxsize: 10 * 1024 * 1024,
-      maxFiles: 5,
-    }),
-    new winston.transports.File({
-      filename: path.join(LOG_DIR, 'error.log'),
-      level: 'error',
-      format: fileFormat,
-      maxsize: 10 * 1024 * 1024,
-      maxFiles: 5,
-    }),
+    // Shared console layout; the entry's `module` fills the source column
+    new winston.transports.Console({ format: consoleFormat() }),
+    ...getFileTransports(),
   ],
 });
 
@@ -66,4 +79,4 @@ function createLogger(moduleName) {
   };
 }
 
-module.exports = { baseLogger, createLogger };
+module.exports = { baseLogger, createLogger, getFileTransports, LOG_DIR };
