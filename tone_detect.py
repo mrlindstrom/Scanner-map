@@ -414,10 +414,23 @@ def main():
     
     # Get detected tone frequencies
     tones = detector.get_detected_tones(result)
+    # Human-readable summary on stderr. Only two-tone hits have tone_a/tone_b;
+    # pulsed, long and hi-low hits have other fields, so describe each by type
+    # and never let this summary fail the run (the JSON above is the result).
     if tones:
-        print(f"\nDetected {len(tones)} two-tone sequence(s):", file=sys.stderr)
-        for i, tone_pair in enumerate(tones):
-            print(f"  {i+1}: {tone_pair['tone_a']:.1f}Hz → {tone_pair['tone_b']:.1f}Hz", file=sys.stderr)
+        print(f"\nDetected {len(tones)} tone(s):", file=sys.stderr)
+        for i, tone in enumerate(tones):
+            try:
+                if 'tone_a' in tone and 'tone_b' in tone:
+                    desc = f"{float(tone['tone_a']):.1f}Hz -> {float(tone['tone_b']):.1f}Hz"
+                elif 'detected' in tone:
+                    freqs = tone['detected'] if isinstance(tone['detected'], (list, tuple)) else [tone['detected']]
+                    desc = ' / '.join(f"{float(f):.1f}Hz" for f in freqs)
+                else:
+                    desc = str({k: v for k, v in tone.items() if k != 'type'})
+                print(f"  {i+1}: {tone.get('type', 'tone')} {desc}", file=sys.stderr)
+            except Exception as e:
+                print(f"  {i+1}: {tone.get('type', 'tone')} (could not describe: {e})", file=sys.stderr)
 
 if __name__ == "__main__":
     main()
