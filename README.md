@@ -113,6 +113,16 @@ Settings: `STORAGE_SAVE_*`, `STORAGE_FALLBACK_*`, `STORAGE_OUTAGE_COOLDOWN_SEC`.
 - **Listen Live events.** Clicking 🎧 Listen Live asks for an event name, and that becomes the voice channel's name. If an event is already running, you can **add the talk group to it**, so one channel plays calls from several talk groups, or **start a new event**, which ends the current one. Discord allows a bot only one voice channel per server, so there is one event at a time. Calls that waited more than 5 minutes in the queue are skipped so the event stays live. The bot ends the event about 2 minutes after the last listener leaves.
 - Keyword alerts now also fire for merged calls.
 
+### 📍 Address extraction & geocoding
+Measured on a day of real calls before the change: only 53% of extracted addresses reached the map, and some pins were on the wrong street.
+- **Search inside the coverage area instead of a guessed city.** Every address used to get the default city appended (`GEOCODING_CITY`), sending Houston streets to "Spring" and some lookups to Big Spring, TX. Now the AI only names a city that is spoken, and LocationIQ searches inside a box around the target counties.
+- **Pick the best of 10 results, not just the first.** A first hit in the wrong county no longer throws the address away.
+- **No more wrong-street pins.** The geocoded street must match the spoken street (spelling and sound-alikes allowed), and named places must match by name. Before, a matching house number on another street could win ("3851 Birkenridge Dr" pinned on Woodbriar Drive).
+- **Fixes misheard street names.** Scanner Map builds a list of real local streets from past geocodes, and when a street isn't found it tries the closest sound-alike: "Tombo Parkway" → Tomball Parkway, "Cuckendall Rd" → Kuykendahl Road.
+- **Fewer good addresses rejected:** spoken digit groups ("10-11 Village Square") are read as one house number, the hallucination check accepts sound-alike spellings, and the extra AI verification is only used for named places and intersections.
+- **Less load on the AI:** calls with no number, street or place word skip extraction (`ADDRESS_PREFILTER`), about 28% of requests.
+- Every extraction and geocoding step is now in the log files (the console still shows only the results), so misses can be reviewed.
+
 ### 📻 Dispatch summary
 - **Finds the calls that matter.** The old summary took the longest transcript from each quarter of the hour, so a rambling traffic stop beat a 5-second "shots fired". Now every call is scored from the signals Scanner Map already has: dispatch tones, keyword matches, the map category, a located address, and high-priority radio phrases. Routine chatter ("10-4", "en route", "show me clear", radio checks) scores low.
 - **The AI triages incidents.** The top candidates go to the AI with a clear severity rubric. It groups related calls into one incident (same address, same units, a dispatch and its follow-ups) and returns only critical, high and medium incidents; routine ones are left out instead of used as padding.

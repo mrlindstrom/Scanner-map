@@ -5,6 +5,7 @@ const fetch = require('node-fetch');
 const winston = require('winston');
 const { getFileTransports } = require('./src/logger');
 const { consoleFormat } = require('./src/consoleFormat');
+const streets = require('./src/geocoding/streets');
 const moment = require('moment-timezone');
 const fs = require('fs');
 const path = require('path');
@@ -93,7 +94,20 @@ if (!process.env.GEOCODING_TARGET_COUNTIES) process.env.GEOCODING_TARGET_COUNTIE
 const TARGET_COUNTIES = process.env.GEOCODING_TARGET_COUNTIES.split(',').map(county => county.trim());
 const COUNTRY_CODES = process.env.GEOCODING_COUNTRY; // LocationIQ uses country codes
 
-// Logger setup (remains the same)
+// Console shows only the extracted and geocoded addresses (plus warnings and
+// errors); the log files keep every step so extraction can be reviewed later.
+const CONSOLE_INFO_PATTERNS = [
+  /^Geocoded Address: ".+" with coordinates \(.+, .+\) in .+$/,
+  /^LLM Extracted Address:/,
+];
+function geocodeConsoleFilter(info) {
+  if (info.level !== 'info') return true;
+  const message = String(info.message || '');
+  if (/^LLM Extracted Address: "No address found\.?"$/.test(message)) return false;
+  return CONSOLE_INFO_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+// Logger setup
 const logger = winston.createLogger({
   level: 'info',
   format: winston.format.combine(
@@ -106,30 +120,9 @@ const logger = winston.createLogger({
   transports: [
     // Daily-rotated JSON files in ./logs, shared with bot.js (see src/logger.js)
     ...getFileTransports(),
-    new winston.transports.Console({ format: consoleFormat({ source: 'geocode' }) })
+    new winston.transports.Console({ format: consoleFormat({ source: 'geocode', filter: geocodeConsoleFilter }) })
   ]
 });
-
-// Override logger.info (remains the same)
-const originalInfo = logger.info.bind(logger);
-const allowedPatterns = [
-  /^Geocoded Address: ".+" with coordinates \(.+, .+\) in .+$/,
-  /^LLM Extracted Address:/
-];
-logger.info = function (...args) {
-  const message = args.join(' ');
-
-  // Specific check to exclude "No address found" messages for LLM extractions
-  if (message.startsWith('LLM Extracted Address:') && 
-      (message.endsWith('"No address found"') || message.endsWith('"No address found."'))) {
-    return; // Do not log this specific message
-  }
-
-  const shouldLog = allowedPatterns.some((pattern) => pattern.test(message));
-  if (shouldLog) {
-    originalInfo(...args);
-  }
-};
 
 // Build TALK_GROUPS from environment variables (remains the same)
 const TALK_GROUPS = {};
@@ -305,7 +298,12 @@ function addressAnchoredInTranscript(address, transcript) {
 
   if (placeWords.length === 0) return false;
 
-  const matched = placeWords.filter((w) => transcriptLower.includes(w));
+  // Sound-alike spellings count: the model may correct a misheard name
+  // ("Tombo Parkway" in the transcript -> "Tomball Parkway").
+  const transcriptWords = transcriptLower.split(/[^a-z0-9]+/).filter((t) => t.length >= 3);
+  const inTranscript = (w) => transcriptLower.includes(w)
+    || (w.length >= 4 && transcriptWords.some((t) => t.length >= 4 && streets.wordSimilarity(t, w) >= 0.88)); // spoken word first
+  const matched = placeWords.filter(inTranscript);
   if (matched.length === 0) return false;
 
   // Intersections: need evidence of two different street names in the transcript.
@@ -315,7 +313,7 @@ function addressAnchoredInTranscript(address, transcript) {
       const sideHits = sides.map((side) => {
         const sideWords = side.split(/[^a-z0-9]+/i)
           .filter((t) => t.length >= 3 && !STREET_SUFFIX_WORDS.has(t) && !/^\d+$/.test(t));
-        return sideWords.some((w) => transcriptLower.includes(w));
+        return sideWords.some(inTranscript);
       });
       return sideHits.filter(Boolean).length >= 2;
     }
@@ -426,8 +424,9 @@ EXTRACTED STREET/PLACE:
 "${core}"
 
 A city and state may have been added automatically to complete the address — IGNORE the city/state and judge only the street, intersection, or named place above.
+The transcript is automatic speech-to-text, so judge the street/place NAME, not how the house number was written: "10-11" may become 1011, "1944 to Archer Glen" may become 1944 Archer Glen, and names may be spelled differently ("Tombo Parkway" for Tomball Parkway).
 Answer NO if any of these are true:
-- The street/place name does NOT appear in the transcript (it was invented or hallucinated).
+- The street/place name does NOT appear in the transcript, even misspelled (it was invented or hallucinated).
 - It is actually a unit number, radio code, ETA/time, signal report, patient age, callsign, or other number — not a real location.
 - The transcript contains no real street, intersection, or named place at all.
 Answer YES if the transcript mentions this street, intersection, or named place (even loosely) as a location.
@@ -470,23 +469,25 @@ Rules:
 - "Cross street X", "cross of X", or a second street listed after the main one is just a nearby reference — IGNORE it and keep only the street that has the house number.
 - Use the "&" intersection format ONLY when there is NO house number and the location is genuinely described as the corner of two streets.
 - Never invent a street that is not spoken in the transcript. Every street/place word in your answer MUST appear in the transcript.
-- Only add ", ${GEOCODING_CITY}, ${GEOCODING_STATE}" to complete an address that has a street but no city. Never output the city/state alone.
+- Add a city ONLY if it is spoken in the transcript. Never guess or add a default city; the search is already limited to the coverage area. Never output a city alone.
 - Coverage counties: ${countiesString}.
-${TARGET_CITIES.length ? `- Known cities/towns: ${TARGET_CITIES.join(', ')}. Prefer a city actually named in the transcript; otherwise pick the most likely one from this list.` : ''}
+${TARGET_CITIES.length ? `- Known cities/towns in the area: ${TARGET_CITIES.join(', ')}.` : ''}
 
 Examples that are NOT locations (respond: No address found):
 - "I made time for 723. 622." (timing/ETA numbers, no street)
 - "Copy that, unit 5 responding, 10-4 received"
 - "Reference 7-9-0-8" (digits alone, no street name follows)
-- "723" or "723, ${GEOCODING_CITY}" (number without a street or place name)
+- "723" (a number without a street or place name)
 
 Formatting:
-- Full address: 123 Main St, ${GEOCODING_CITY}, ${GEOCODING_STATE}
-- Block ("300 block of Maple Dr") -> 300 Maple Dr, ${GEOCODING_CITY}, ${GEOCODING_STATE}
-- Intersection (no house number only): use "&" between the two streets -> Main St & Oak Ave, ${GEOCODING_CITY}, ${GEOCODING_STATE}
-- Address WITH a house number plus a cross street -> keep only the numbered street. ("71003 Luttrell Lane, cross street Westchester Drive" -> 71003 Luttrell Lane, ${GEOCODING_CITY}, ${GEOCODING_STATE})
+- Address: 123 Main St (add ", City" only when the city is spoken: 123 Main St, Tomball)
+- Block ("300 block of Maple Dr") -> 300 Maple Dr
+- Spoken digit groups are one house number ("10-11 Village Square" -> 1011 Village Square; "27, 419 Tomball Parkway" -> 27419 Tomball Parkway)
+- Intersection (no house number only): use "&" between the two streets -> Main St & Oak Ave
+- Address WITH a house number plus a cross street -> keep only the numbered street. ("71003 Luttrell Lane, cross street Westchester Drive" -> 71003 Luttrell Lane)
+- When the address is repeated, use the clearest complete version.
 
-Respond with ONLY the location on one line (for example: 7908 Cindy Lane, ${GEOCODING_CITY}, ${GEOCODING_STATE}), or exactly: No address found
+Respond with ONLY the location on one line (for example: 7908 Cindy Lane), or exactly: No address found
 Do not wrap the answer in quotes and do not add any commentary.
 
 Transcript (from ${town}):
@@ -633,105 +634,192 @@ async function geocodeAddress(address) {
   }
 }
 
-async function geocodeAddressWithLocationIQ(address) {
-  // 2. Prepare API Request
-  const endpoint = `https://us1.locationiq.com/v1/search`;
+// --- Search area and street list ---------------------------------------------
+// Searches are limited to a box around the target counties instead of naming a
+// city (appending GEOCODING_CITY sent Houston streets to "Spring" and some to
+// Big Spring, TX). The street list holds real local road names from past
+// geocodes, used to correct misheard streets (see src/geocoding/streets.js).
+
+let targetViewbox = null;        // "minLon,minLat,maxLon,maxLat" for LocationIQ
+let targetViewboxPromise = null;
+let streetGazetteer = [];
+
+async function getTargetViewbox() {
+  if (targetViewbox !== null || !LOCATIONIQ_API_KEY) return targetViewbox || null;
+  if (!targetViewboxPromise) {
+    targetViewboxPromise = (async () => {
+      const boxes = [];
+      for (const county of TARGET_COUNTIES) {
+        const name = /county|parish/i.test(county) ? county : `${county} County`;
+        const params = new URLSearchParams({ q: `${name}, ${GEOCODING_STATE}`, key: LOCATIONIQ_API_KEY, format: 'json', limit: '1', countrycodes: COUNTRY_CODES });
+        try {
+          const res = await fetch(`https://us1.locationiq.com/v1/search?${params}`);
+          const data = res.ok ? await res.json() : [];
+          const bb = Array.isArray(data) && data[0] && data[0].boundingbox; // [south, north, west, east]
+          if (bb) boxes.push(bb.map(Number));
+          await new Promise((r) => setTimeout(r, 600)); // free plan: 2 requests/second
+        } catch (e) {
+          logger.warn(`[Geocoding] Could not look up the area of ${name}: ${e.message}`);
+        }
+      }
+      if (boxes.length === 0) {
+        logger.warn('[Geocoding] No target county areas found; searching without an area limit');
+        targetViewbox = '';
+        return null;
+      }
+      const pad = 0.02; // ~2 km so addresses on a county line aren't cut off
+      const south = Math.min(...boxes.map((b) => b[0])) - pad, north = Math.max(...boxes.map((b) => b[1])) + pad;
+      const west = Math.min(...boxes.map((b) => b[2])) - pad, east = Math.max(...boxes.map((b) => b[3])) + pad;
+      targetViewbox = `${west},${south},${east},${north}`;
+      logger.info(`[Geocoding] Searching within ${TARGET_COUNTIES.join(' + ')}: ${targetViewbox}`);
+      return targetViewbox;
+    })();
+  }
+  return targetViewboxPromise;
+}
+
+/** Build the street list from addresses already geocoded (call at startup and daily). */
+function loadStreetGazetteer(db) {
+  return new Promise((resolve) => {
+    db.all('SELECT address FROM transcriptions WHERE address IS NOT NULL AND lat IS NOT NULL', [], (err, rows) => {
+      if (err) {
+        logger.warn(`[Geocoding] Could not build the street list: ${err.message}`);
+        return resolve(streetGazetteer.length);
+      }
+      streetGazetteer = streets.buildGazetteer(rows.map((r) => r.address));
+      logger.info(`[Geocoding] Street list: ${streetGazetteer.length} local streets from ${rows.length} past geocodes`);
+      resolve(streetGazetteer.length);
+    });
+  });
+}
+
+function houseNumberOf(address) {
+  const m = String(address || '').match(/^\s*(\d+)[a-z]?\s/i);
+  return m ? m[1] : null;
+}
+
+async function locationIqSearch(query, viewbox) {
   const params = new URLSearchParams({
-    q: address,
+    q: query,
     key: LOCATIONIQ_API_KEY,
     format: 'json',
     addressdetails: '1',
     normalizeaddress: '1',
     countrycodes: COUNTRY_CODES,
-    limit: '1'
+    limit: '10',
+    dedupe: '1',
   });
+  if (viewbox) { params.set('viewbox', viewbox); params.set('bounded', '1'); }
+  const response = await fetch(`https://us1.locationiq.com/v1/search?${params.toString()}`);
+  if (response.status === 404) return []; // LocationIQ answers "no results" with 404
+  if (!response.ok) {
+    logger.error(`LocationIQ API error: ${response.status} ${response.statusText} for query: "${query}"`);
+    return [];
+  }
+  const data = await response.json();
+  return Array.isArray(data) ? data : [];
+}
 
+/**
+ * Check one LocationIQ result. Returns { ok, reason, exactHouse, result }.
+ * spokenStreet is the street as extracted (or corrected); results on another
+ * street are rejected so a matching house number elsewhere can't win.
+ */
+function judgeLocationIqResult(result, spokenStreet, houseNumber, spokenPlace) {
+  const lat = parseFloat(result.lat), lon = parseFloat(result.lon);
+  const details = result.address || {};
+  if (isNaN(lat) || isNaN(lon) || !result.display_name) return { ok: false, reason: 'missing coordinates' };
+
+  const isAdmin = ['city', 'town', 'village', 'municipality', 'administrative', 'county', 'state', 'postcode'].includes(result.type);
+  const isHighway = result.class === 'highway' || result.type === 'intersection';
+  const isPlace = result.class === 'place' && !isAdmin;
+  if (!details.road && !isPlace && !isHighway) return { ok: false, reason: `too vague (${result.type})` };
+
+  if (!details.county || !isTargetCounty(details.county)) {
+    return { ok: false, reason: `outside target counties (${details.county || 'no county'})` };
+  }
+  const cityName = details.city || details.town || details.village || details.hamlet || details.municipality || '';
+  if (TARGET_CITY_SET.size && !isTargetCity(cityName)) {
+    return { ok: false, reason: `city "${cityName || 'unknown'}" not in TARGET_CITIES_LIST` };
+  }
+  const exactHouse = !!(houseNumber && details.house_number && String(details.house_number) === String(houseNumber));
+  if (spokenStreet && details.road) {
+    // A matching house number backs up a loose spelling match; a street-level
+    // result (house number not found) has to match the name more closely.
+    const needed = houseNumber && !exactHouse ? 0.95 : 0.88;
+    if (!streets.roadMatches(spokenStreet, details.road, needed)) {
+      return { ok: false, reason: `different street (${details.road})` };
+    }
+  } else if (!spokenStreet && spokenPlace) {
+    // Named place or intersection: the result has to be that place / one of those streets
+    const sides = spokenPlace.split(/\s+(?:&|and)\s+/i);
+    // normalizeaddress=1 leaves out class/type: a street result leads with the
+    // road name or a house number, a place leads with its own name
+    const leading = result.display_name.split(',')[0].trim();
+    const isStreetResult = result.class === 'highway'
+      || (!!details.road && (leading === details.road || /^\d/.test(leading)));
+    let ok;
+    if (sides.length > 1) {
+      // Intersection: on one of the two streets
+      ok = sides.some((side) => details.road && streets.roadMatches(side, details.road));
+    } else if (streets.parseStreet(spokenPlace).suffix || streets.isNumberedRoad(spokenPlace)) {
+      // A street with no house number ("Spring Cypress Road"): must be that street
+      ok = !!details.road && streets.roadMatches(spokenPlace, details.road, 0.95);
+    } else {
+      // A named place (school, store, park): the place itself, never a street
+      // that shares a word with it ("Lucas Auto Care" is not Lucas Street)
+      const placeName = [details.name, result.display_name.split(',')[0]].filter(Boolean).join(' ');
+      ok = !isStreetResult && streets.placeMatches(spokenPlace, placeName);
+    }
+    if (!ok) return { ok: false, reason: `different place (${result.display_name.split(',')[0]})` };
+  }
+  return {
+    ok: true,
+    exactHouse,
+    result: { lat, lng: lon, formatted_address: result.display_name, county: details.county },
+  };
+}
+
+/** Best acceptable result for a query: exact house number first, then the geocoder's order. */
+async function bestLocationIqMatch(query, spokenStreet, houseNumber, viewbox) {
+  const results = await locationIqSearch(query, viewbox);
+  const spokenPlace = query.split(',')[0].trim();
+  const judged = results.map((r) => judgeLocationIqResult(r, spokenStreet, houseNumber, spokenPlace));
+  const good = judged.filter((j) => j.ok);
+  const pick = good.find((j) => j.exactHouse) || good[0];
+  return { pick: pick ? pick.result : null, exactHouse: !!(pick && pick.exactHouse), judged, count: results.length };
+}
+
+async function geocodeAddressWithLocationIQ(address) {
   try {
-    // 3. Make API Call
-    const response = await fetch(`${endpoint}?${params.toString()}`);
-    if (!response.ok) {
-      logger.error(`LocationIQ API error: ${response.status} ${response.statusText}`);
-      const errorBody = await response.text();
-      logger.error(`LocationIQ Error Body: ${errorBody} for query: "${address}"`);
-      return null;
-    }
+    const viewbox = await getTargetViewbox();
+    const spokenStreet = streets.streetOf(address);
+    const houseNumber = houseNumberOf(address);
 
-    // 4. Parse Response
-    const data = await response.json();
-    if (!Array.isArray(data) || data.length === 0) {
-      logger.warn(`LocationIQ API returned no results for address: "${address}"`);
-      return null;
-    }
+    let { pick, exactHouse, judged, count } = await bestLocationIqMatch(address, spokenStreet, houseNumber, viewbox);
+    let usedQuery = address;
 
-    const result = data[0];
-
-    // Extract key fields
-    const lat = parseFloat(result.lat);
-    const lon = parseFloat(result.lon);
-    const display_name = result.display_name;
-    const resultType = result.type;
-    const resultClass = result.class;
-    const addressDetails = result.address || {};
-    const county = addressDetails.county || null;
-
-    // Basic check for essential coordinates and display name
-    if (isNaN(lat) || isNaN(lon) || !display_name) {
-       logger.warn(`LocationIQ response missing essential fields (lat/lon/display_name) for address: "${address}"`);
-       return null;
-    }
-
-    // --- START: Final Revised Filtering Logic ---
-
-    // 5. Specificity Filtering - Require road info unless it's a specific non-admin place/highway.
-    const hasRoadInfo = !!(addressDetails.road);
-    const isCityAdminType = ['city', 'town', 'village', 'municipality', 'administrative', 'county', 'state', 'postcode'].includes(resultType);
-
-    // Is it a highway/intersection? (Specific enough)
-    const isHighwayOrIntersection = (resultClass === 'highway' || resultType === 'intersection');
-
-    // Is it classified as a 'place' BUT NOT also typed as a city/admin area? (Specific enough POI)
-    const isSpecificPlace = (resultClass === 'place' && !isCityAdminType);
-
-    // If there is NO road information AND it's NOT a specific place AND it's NOT a highway/intersection, filter it out.
-    if (!hasRoadInfo && !isSpecificPlace && !isHighwayOrIntersection) {
-        logger.info(`[Filter Action] Skipping result lacking road info and not a specific place/highway (Type: ${resultType}, Class: ${resultClass}): "${display_name}"`);
-        return null;
-    }
-
-    // --- END: Final Revised Filtering Logic ---
-
-
-    // 6. Target County Filtering (normalized: case-insensitive, ignores the
-    //    "County"/"Parish" suffix so "Montgomery" matches "Montgomery County").
-    if (!county || !isTargetCounty(county)) {
-      const countiesList = TARGET_COUNTIES.join(' or ');
-      if (!county) {
-        logger.warn(`[Filter Action] Specific address "${display_name}" OK but LocationIQ did not return county information. Cannot verify target county.`);
-      } else {
-        logger.warn(`[Filter Action] Specific address "${display_name}" OK but geocoded county "${county}" is not within target counties: ${countiesList}.`);
-      }
-      return null;
-    }
-
-    // 6b. Target City Filtering (only if a TARGET_CITIES_LIST was configured).
-    if (TARGET_CITY_SET.size) {
-      const cityName = addressDetails.city || addressDetails.town || addressDetails.village
-        || addressDetails.hamlet || addressDetails.municipality || '';
-      if (!isTargetCity(cityName)) {
-        logger.warn(`[Filter Action] Address "${display_name}" is in target county but city "${cityName || 'unknown'}" is not in TARGET_CITIES_LIST. Skipping (won't plot).`);
-        return null;
+    // Not found as spoken: try the closest real local street (speech-to-text
+    // often mishears names, e.g. "Tombo Parkway" for Tomball Parkway)
+    if (!pick && spokenStreet) {
+      const corrected = streets.correctStreet(spokenStreet, streetGazetteer);
+      if (corrected) {
+        const correctedAddress = address.replace(spokenStreet, corrected.road);
+        logger.info(`[Geocoding] "${spokenStreet}" not found; trying likely street "${corrected.road}" (match ${corrected.score})`);
+        await new Promise((r) => setTimeout(r, 500)); // free plan: 2 requests/second
+        ({ pick, exactHouse, judged, count } = await bestLocationIqMatch(correctedAddress, corrected.road, houseNumber, viewbox));
+        usedQuery = correctedAddress;
       }
     }
 
-    // 7. Success: Return Formatted Result
-    logger.info(`Geocoded Address: "${display_name}" with coordinates (${lat}, ${lon}) in ${county}`);
-    return {
-        lat: lat,
-        lng: lon,
-        formatted_address: display_name,
-        county: county
-    };
-
+    if (!pick) {
+      const reasons = [...new Set(judged.map((j) => j.reason))].slice(0, 3).join('; ');
+      logger.warn(`[Filter Action] No usable geocode for "${usedQuery}": ${count ? `${count} result(s) rejected (${reasons})` : 'no results in the target area'}`);
+      return null;
+    }
+    logger.info(`Geocoded Address: "${pick.formatted_address}" with coordinates (${pick.lat}, ${pick.lng}) in ${pick.county}` +
+      (houseNumber && !exactHouse ? ' (street-level, house number not found)' : ''));
+    return pick;
   } catch (error) {
     logger.error(`Unexpected error in geocodeAddressWithLocationIQ for query "${address}": ${error.message}`, { stack: error.stack });
     return null;
@@ -740,7 +828,12 @@ async function geocodeAddressWithLocationIQ(address) {
 
 async function geocodeAddressWithGoogleMaps(address) {
   const endpoint = `https://maps.googleapis.com/maps/api/geocode/json`;
-  
+  // Extraction no longer guesses a city; Google has no area limit here, so
+  // fall back to the default city when none was spoken ("123 Main St, TX").
+  if (address.split(',').map((p) => p.trim()).filter(Boolean).length <= 2) {
+    address = address.replace(new RegExp(`,\\s*${escapeRegExp(GEOCODING_STATE)}\\s*$`, 'i'), `, ${GEOCODING_CITY}, ${GEOCODING_STATE}`);
+  }
+
   const params = new URLSearchParams({
     address: address,
     key: GOOGLE_MAPS_API_KEY,
@@ -942,10 +1035,17 @@ async function extractAddress(transcript, talkGroupId, systemName) {
   }
 
   // Second-pass LLM sanity check (does this address actually make sense for the
-  // transcript?). Catches subtle mistakes the structural checks above can't.
-  const verified = await verifyAddressWithLLM(extractedAddress, transcript);
-  if (!verified) {
-    return null;
+  // transcript?). A house number on a street named in the transcript is already
+  // well supported, and the geocoder must then find that same street, so only
+  // named places and intersections (where the model is likelier to misread
+  // chatter as a location) get the extra AI request.
+  const hasHouseNumberAndStreet = /^\s*\d+[a-z]?\s+\S/i.test(addressCorePart(extractedAddress))
+    && !/\s(&|and)\s/i.test(addressCorePart(extractedAddress));
+  if (!hasHouseNumberAndStreet) {
+    const verified = await verifyAddressWithLLM(extractedAddress, transcript);
+    if (!verified) {
+      return null;
+    }
   }
 
   // LLM extraction log moved inside extractAddressWithLLM
@@ -998,6 +1098,7 @@ async function processTranscriptAndLink(transcript, talkGroupId) {
 
 
 module.exports = {
+  loadStreetGazetteer,
   extractAddress,
   geocodeAddress,
   hyperlinkAddress, // Note: Signature changed slightly if used directly

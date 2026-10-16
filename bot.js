@@ -124,6 +124,9 @@ const { runMigrations } = require('./src/db/migrations');
 const { audioUrl: buildAudioUrl, getPublicBaseUrl } = require('./src/utils/publicUrl');
 const callEmbeds = require('./src/discord/callEmbeds');
 const summaryTriage = require('./src/summary/triage');
+const streetMatching = require('./src/geocoding/streets');
+// Skip the AI for calls that can't contain a location (no number, street or place word)
+const ADDRESS_PREFILTER_ENABLED = String(process.env.ADDRESS_PREFILTER ?? 'true').toLowerCase() !== 'false';
 const summaryIncidents = require('./src/summary/incidents');
 const audioPreprocess = require('./src/transcription/audioPreprocess');
 const hallucinationFilter = require('./src/transcription/hallucinationFilter');
@@ -1031,10 +1034,13 @@ async function initializeBot() {
     }
 
     // Step 4: Load talkgroups for geocoding
-    const { loadTalkGroups } = require('./geocoding');
+    const { loadTalkGroups, loadStreetGazetteer } = require('./geocoding');
     const talkGroups = await loadTalkGroups(db);
     Object.assign(TALK_GROUPS, talkGroups);
     logger.info(`Loaded ${Object.keys(TALK_GROUPS).length} talk groups for geocoding`);
+    // Local street names for correcting misheard streets; refreshed daily as more calls are geocoded
+    await loadStreetGazetteer(db);
+    setInterval(() => loadStreetGazetteer(db), 24 * 60 * 60 * 1000);
 
     // Step 5: Load API keys
     loadApiKeys();
@@ -4154,10 +4160,13 @@ async function analyzeCall(id, transcriptionText, talkGroupID, talkGroupName, sy
   }
 
   // Handle address extraction based on mode
-  if (transcriptionText.length >= 15 && shouldCheckForAddress(talkGroupID, id, systemName)) {
+  const locationPossible = !ADDRESS_PREFILTER_ENABLED || streetMatching.mightContainLocation(transcriptionText);
+  if (transcriptionText.length >= 15 && locationPossible && shouldCheckForAddress(talkGroupID, id, systemName)) {
     await extractAndProcessAddress(id, transcriptionText, talkGroupID, systemName);
   } else if (transcriptionText.length < 15) {
     logger.info(`Skipping address extraction for short transcription (ID ${id}): ${transcriptionText.length} characters`);
+  } else if (!locationPossible) {
+    logger.debug(`Skipping address extraction for ID ${id}: no number, street or place mentioned`);
   } else if (!IS_TWO_TONE_MODE_ENABLED) {
     logger.info(`Skipping address extraction for non-whitelisted talk group: ${talkGroupID}`);
   }
