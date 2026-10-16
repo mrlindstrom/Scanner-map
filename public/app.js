@@ -927,7 +927,7 @@ function initMap() {
 
     setupEventListeners();
     L.control.scale().addTo(map);
-    loadCalls(timeRangeHours);
+    // Calls are loaded once by setupCallsAndUpdates()
 
     map.on('zoomend', function() {
         console.log('Current zoom level:', map.getZoom());
@@ -2540,13 +2540,17 @@ function clearMarkers() {
     console.log(`[DEBUG] allMarkers count after clear: ${Object.keys(allMarkers).length}`);
 }
 
+let loadCallsSeq = 0;
 function loadCalls(hours) {
+    // Only the newest request draws the map, so an older reply can't wipe it
+    const seq = ++loadCallsSeq;
     console.log(`[DEBUG] loadCalls started with hours: ${hours}`);
     console.log(`[DEBUG] Current allMarkers count before fetch: ${Object.keys(allMarkers).length}`);
     
     fetch(`/api/calls?hours=${hours}`)
         .then(response => response.json())
         .then(calls => {
+            if (seq !== loadCallsSeq) return;
             console.log(`[DEBUG] Received ${calls.length} calls from server`);
             if (calls.length > 0) {
                 console.log(`[DEBUG] Oldest call received: ${calls[calls.length - 1].timestamp}`);
@@ -2608,12 +2612,15 @@ function focusLinkedCall() {
     try { callId = new URLSearchParams(window.location.search).get('call'); } catch (e) { return false; }
     if (!callId) return false;
     const data = allMarkers[callId];
-    if (!data || !data.marker) {
-        console.warn(`Linked call ${callId} isn't in the current time range or has no location`);
+    if (!data || !data.marker || !data.visible) {
+        console.warn(`Linked call ${callId} isn't in the current time range, filters or has no location`);
+        showNotification(`Call ${callId} isn't on the map for the selected time range`, 'error');
         return false;
     }
-    map.setView(data.marker.getLatLng(), Math.min(17, map.getMaxZoom()));
-    markerGroups.zoomToShowLayer(data.marker, () => data.marker.openPopup());
+    map.setView(data.marker.getLatLng(), Math.min(17, map.getMaxZoom()), { animate: false });
+    markerGroups.zoomToShowLayer(data.marker, () => {
+        if (!data.marker.isPopupOpen()) data.marker.openPopup();
+    });
     return true;
 }
 
@@ -4306,7 +4313,6 @@ async function initializeApp() {
     setupHeatmapControls();
     setupLiveFeed();
     setupUserLocationButton(); // ADDED: Setup for the new location button
-    loadCalls(timeRangeHours);
     setupUserManagement();
     setupSidebarToggle();
 
