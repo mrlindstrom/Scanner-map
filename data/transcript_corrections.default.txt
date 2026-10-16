@@ -1,0 +1,43 @@
+# Transcript fixes: words the transcriber mishears, and what was really said.
+# One per line:   heard => correct      # optional note
+# Case doesn't matter and only whole words match; in a phrase, spaces also
+# match hyphens. A longer phrase wins over a shorter rule inside it.
+# Edit here or in Settings -> Transcript Fixes; changes apply to new calls
+# within a few seconds, without a restart.
+
+# Starting list: mishearings of local streets found in a week of calls
+# (Oct 2026), with the number of calls each was heard in.
+
+Kirkendall => Kuykendahl    # 128; Kuykendahl itself was never transcribed
+Kirkendale => Kuykendahl    # 10
+Cookhandle => Kuykendahl    # 4
+Cuckendall => Kuykendahl
+Loretta => Louetta    # 63, mostly "Loretta Road" / "Loretta Crossing"
+Luetta => Louetta    # 22
+Tumble Parkway => Tomball Parkway    # 11
+Tombaugh => Tomball    # 20
+Tombo => Tomball    # 20
+Tombow => Tomball    # 13
+Tumbo => Tomball    # 6
+Holdsworth => Holzwarth    # 11, "Holdsworth Road and Meadow Edge"
+Halsworth => Holzwarth    # 7
+Holsworth => Holzwarth    # "Old Holsworth Road at Luetta Road"
+Holdraith => Holderrieth    # 3
+East Ritchie => East Richey
+West Ritchie => West Richey
+Ritchie Road => Richey Road
+Telgi => Telge    # 16
+Telga => Telge    # 6
+Steubner => Stuebner    # 11, "Spring Steubner", "Steubner Airline"
+Cutton => Cutten    # 9
+Hussmouth => Hufsmith
+Fuzzle => Fuzzel    # 8, "Riley Fuzzle Road"
+Cypress Wood => Cypresswood    # 60
+Hershfield => Hirschfield
+
+# Houston streets
+Shepard => Shepherd    # 205, "North Shepard", "Shepard Drive"
+West Hamer => Westheimer    # 32, "West Hamer at Central Market"
+West Hammer => Westheimer    # 9
+Bissonnay => Bissonnet    # 18
+Maxi Road => Maxey Road    # 21

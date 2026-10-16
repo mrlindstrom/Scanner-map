@@ -51,6 +51,7 @@ Ideas adapted from [RadioTranscriber](https://github.com/Nite01007/RadioTranscri
   - dots-only or foreign-script output
 
   Real speech is never cut short: a cutoff phrase only trims when it's near the end. `TRANSCRIPT_FILTER_*`, `TRANSCRIPT_UNIT_MAPPINGS`
+- **Transcript fixes** for words the transcriber reliably mishears ("Kirkendall" → Kuykendahl, "Tombo Parkway" → Tomball Parkway). One rule per line in `data/transcript_corrections.txt` (`heard => correct  # note`), editable by hand or under **Settings → Transcript Fixes**, which can also count how often each rule matched in the last week and try the list on sample text. Whole words only, case-insensitive; changes apply to new calls within seconds, without a restart. It starts from `data/transcript_corrections.default.txt`: 31 local street mishearings found in a week of calls. The live file isn't tracked by git, so editing it never blocks an update.
 - **Tunable local Whisper**: beam size, patience, temperature, no-speech threshold, VAD silence, segment dropping, and a retry without VAD. The defaults keep the previous behaviour. `WHISPER_*`
 - **Waits for the full transcript** before addressing, alerting and posting, so long calls aren't handled from partial text.
 

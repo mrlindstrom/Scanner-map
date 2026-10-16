@@ -15,6 +15,7 @@ const apiKeys = require('./apiKeys');
 const pythonEnv = require('./pythonEnv');
 const geoHelpers = require('./geoHelpers');
 const maintenance = require('./maintenance');
+const transcriptCorrections = require('../transcription/corrections');
 
 // Proxy a request to the bot process's localhost-only internal API (where the
 // Discord client lives). The bot and webserver are separate processes.
@@ -443,6 +444,48 @@ function mountSetup(app, deps = {}) {
   app.get('/api/setup/update/check', (req, res) => res.json(maintenance.updateCheck()));
   app.post('/api/setup/update/run', (req, res) => res.json(maintenance.updateRun()));
   app.get('/api/setup/update/status', (req, res) => res.json(maintenance.getUpdateStatus()));
+
+  // --- Transcript fixes (data/transcript_corrections.txt) ---
+  app.get('/api/setup/corrections', (req, res) => {
+    try {
+      const { rules } = transcriptCorrections.loadRules();
+      res.json({ ok: true, file: transcriptCorrections.FILE,
+        rules: rules.map((r, id) => ({ id, heard: r.heard, replacement: r.replacement, note: r.note })) });
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+  app.put('/api/setup/corrections', (req, res) => {
+    const rules = (req.body && req.body.rules) || null;
+    if (!Array.isArray(rules)) return res.status(400).json({ ok: false, error: 'rules must be a list' });
+    try {
+      const saved = transcriptCorrections.saveRules(rules);
+      res.json({ ok: true, saved });
+    } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+  });
+  // Try the (unsaved) rules on some text
+  app.post('/api/setup/corrections/test', (req, res) => {
+    const { text, rules } = req.body || {};
+    const compiled = transcriptCorrections.compile(Array.isArray(rules) ? rules : transcriptCorrections.loadRules().rules);
+    res.json({ ok: true, ...transcriptCorrections.applyCompiled(String(text || ''), compiled) });
+  });
+  // How often each rule would have matched in recent transcripts
+  app.post('/api/setup/corrections/count', (req, res) => {
+    const db = getDb();
+    if (!db) return res.json({ ok: false, error: 'Database not available' });
+    const rules = Array.isArray((req.body || {}).rules) ? req.body.rules : [];
+    const days = Math.min(Math.max(parseInt((req.body || {}).days, 10) || 7, 1), 90);
+    const since = Math.floor(Date.now() / 1000) - days * 86400;
+    db.all('SELECT transcription FROM transcriptions WHERE timestamp > ? AND transcription IS NOT NULL', [since], (err, rows) => {
+      if (err) return res.json({ ok: false, error: err.message });
+      const counts = rules.map((r) => {
+        const compiled = transcriptCorrections.compile([r]);
+        if (!compiled.regex) return 0;
+        let n = 0;
+        for (const row of rows) { const m = row.transcription.match(compiled.regex); if (m) n += m.length; }
+        return n;
+      });
+      res.json({ ok: true, days, calls: rows.length, counts });
+    });
+  });
 
   // --- Discord tools (proxied to the bot process) ---
   app.get('/api/setup/discord/channels', async (req, res) => res.json(await botProxy('/internal/discord/channels')));

@@ -1322,6 +1322,130 @@
     },
   };
 
+  // ---- Transcript Fixes ---------------------------------------------------
+  const correctionsStep = {
+    title: 'Transcript Fixes',
+    render(c) {
+      c.appendChild(el('h1', {}, 'Transcript Fixes'));
+      c.appendChild(el('p', { class: 'lead' }, 'Words the transcriber reliably mishears, and what was really said. Fixes apply to new calls before addresses are extracted, so a corrected street name can also be found on the map.'));
+      const fileHint = el('div', { class: 'hint', style: 'margin-bottom:10px' }, '');
+      c.appendChild(fileHint);
+      c.appendChild(infoBox('Case doesn\'t matter and only whole words match ("Tombo" won\'t change "Tombolo"). In a phrase, spaces also match hyphens. ' +
+        'Use a phrase when the word alone is too common: <code>Maxi Road</code> → <code>Maxey Road</code>. Saved fixes apply within a few seconds, without a restart; calls already transcribed aren\'t changed.'));
+
+      let rules = [];
+      let counts = null;
+      let dirty = false;
+
+      const bar = el('div', { class: 'tg-bulk' });
+      const filter = el('input', { type: 'text', placeholder: 'Filter…', style: 'max-width:220px' });
+      const addBtn = el('button', { class: 'btn btn-sm', type: 'button' }, '+ Add fix');
+      const countBtn = el('button', { class: 'btn btn-sm', type: 'button' }, 'Count matches (last 7 days)');
+      const saveBtn = el('button', { class: 'btn btn-sm btn-primary', type: 'button', disabled: 'disabled' }, 'Save');
+      const revertBtn = el('button', { class: 'btn btn-sm', type: 'button', disabled: 'disabled' }, 'Discard changes');
+      const status = el('span', { class: 'sel-count' }, '');
+      [filter, addBtn, countBtn, saveBtn, revertBtn, status].forEach((n) => bar.appendChild(n));
+      c.appendChild(bar);
+
+      const wrap = el('div', { class: 'tg-table-wrap', style: 'max-height:460px' }, 'Loading…');
+      c.appendChild(wrap);
+
+      const setDirty = (d) => {
+        dirty = d;
+        saveBtn.disabled = !d; revertBtn.disabled = !d;
+        status.textContent = d ? 'Unsaved changes' : `${rules.length} fix(es)`;
+      };
+
+      const render = () => {
+        const q = filter.value.trim().toLowerCase();
+        const table = el('table');
+        table.innerHTML = '<thead><tr><th>Heard</th><th></th><th>Correct</th><th>Note</th><th title="Matches in the last 7 days">Seen</th><th></th></tr></thead>';
+        const tbody = el('tbody');
+        rules.forEach((r, i) => {
+          if (q && ![r.heard, r.replacement, r.note].some((v) => String(v || '').toLowerCase().includes(q))) return;
+          const tr = el('tr');
+          const input = (field, placeholder) => {
+            const td = el('td');
+            const inp = el('input', { type: 'text', placeholder });
+            inp.value = r[field] || '';
+            inp.addEventListener('input', () => { r[field] = inp.value; setDirty(true); });
+            td.appendChild(inp);
+            return td;
+          };
+          tr.appendChild(input('heard', 'Kirkendall'));
+          tr.appendChild(el('td', { style: 'color:var(--muted)' }, '→'));
+          tr.appendChild(input('replacement', 'Kuykendahl'));
+          tr.appendChild(input('note', 'optional'));
+          tr.appendChild(el('td', { class: 'hint' }, counts && counts[i] != null ? String(counts[i]) : ''));
+          const td = el('td');
+          const del = el('button', { class: 'btn btn-sm btn-danger', type: 'button', title: 'Remove' }, '✕');
+          del.addEventListener('click', () => { rules.splice(i, 1); if (counts) counts.splice(i, 1); setDirty(true); render(); });
+          td.appendChild(del);
+          tr.appendChild(td);
+          tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+        wrap.innerHTML = '';
+        wrap.appendChild(table);
+        if (!rules.length) wrap.appendChild(el('div', { class: 'hint', style: 'padding:10px' }, 'No fixes yet. Use “+ Add fix”.'));
+      };
+
+      const load = async () => {
+        const r = await adminFetch('/api/setup/corrections');
+        if (!r.ok || !r.data || !r.data.ok) { wrap.innerHTML = ''; wrap.appendChild(el('div', { class: 'hint', style: 'padding:10px' }, escapeHtml((r.data && r.data.error) || 'Could not load the fixes.'))); return; }
+        rules = r.data.rules;
+        counts = null;
+        fileHint.textContent = `Stored in ${r.data.file} (you can also edit this file by hand).`;
+        setDirty(false);
+        render();
+      };
+
+      filter.addEventListener('input', render);
+      addBtn.addEventListener('click', () => {
+        filter.value = '';
+        rules.unshift({ heard: '', replacement: '', note: '' });
+        if (counts) counts.unshift(null);
+        setDirty(true); render();
+        const first = wrap.querySelector('tbody input');
+        if (first) first.focus();
+      });
+      revertBtn.addEventListener('click', () => { if (confirm('Discard unsaved changes?')) load(); });
+      saveBtn.addEventListener('click', async () => {
+        const keep = rules.filter((r) => String(r.heard || '').trim() || String(r.replacement || '').trim());
+        saveBtn.disabled = true;
+        const r = await adminFetch('/api/setup/corrections', { method: 'PUT', body: JSON.stringify({ rules: keep }) });
+        if (r.ok && r.data && r.data.ok) { toast(`Saved ${r.data.saved} fix(es)`, 'ok'); load(); }
+        else { toast((r.data && r.data.error) || 'Save failed', 'err'); saveBtn.disabled = false; }
+      });
+      countBtn.addEventListener('click', async () => {
+        countBtn.disabled = true; status.textContent = 'Counting…';
+        const r = await adminFetch('/api/setup/corrections/count', { method: 'POST', body: JSON.stringify({ rules, days: 7 }) });
+        countBtn.disabled = false;
+        if (r.ok && r.data && r.data.ok) { counts = r.data.counts; render(); status.textContent = `Counted in ${r.data.calls.toLocaleString()} calls`; }
+        else { toast((r.data && r.data.error) || 'Count failed', 'err'); setDirty(dirty); }
+      });
+
+      // Try the current (unsaved) list on some text
+      c.appendChild(el('h3', { style: 'margin-top:22px' }, 'Try it'));
+      const testIn = el('textarea', { placeholder: 'Paste a transcript, e.g. "2410 Telga Road near Kirkendall"' });
+      const testOut = el('div', { class: 'result', style: 'white-space:pre-wrap' }, '');
+      c.appendChild(testIn); c.appendChild(testOut);
+      let testTimer = null;
+      testIn.addEventListener('input', () => {
+        clearTimeout(testTimer);
+        testTimer = setTimeout(async () => {
+          if (!testIn.value.trim()) { testOut.textContent = ''; return; }
+          const r = await adminFetch('/api/setup/corrections/test', { method: 'POST', body: JSON.stringify({ text: testIn.value, rules }) });
+          const d = r.data || {};
+          testOut.className = 'result ' + (d.applied && d.applied.length ? 'ok' : '');
+          testOut.textContent = d.ok ? `${d.text}\n\n${d.applied.length ? 'Fixed: ' + d.applied.map((a) => `${a.heard} → ${a.replacement}`).join(', ') : 'No fixes apply.'}` : (d.error || 'Test failed');
+        }, 300);
+      });
+
+      load();
+    },
+  };
+
   // ---- Users --------------------------------------------------------------
   const usersStep = {
     title: 'Users',
@@ -1472,7 +1596,7 @@
   if (SETTINGS_MODE) {
     if (steps[steps.length - 1].title === 'Review & Finish') steps.pop();
     steps.push(
-      apiKeysStep, discordStep, plotStep, purgeStep,
+      apiKeysStep, discordStep, plotStep, correctionsStep, purgeStep,
       usersStep, sessionsStep, maintenanceStep, updatesStep, healthStep,
     );
   }

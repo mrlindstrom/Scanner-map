@@ -130,6 +130,7 @@ const ADDRESS_PREFILTER_ENABLED = String(process.env.ADDRESS_PREFILTER ?? 'true'
 const summaryIncidents = require('./src/summary/incidents');
 const audioPreprocess = require('./src/transcription/audioPreprocess');
 const hallucinationFilter = require('./src/transcription/hallucinationFilter');
+const transcriptCorrections = require('./src/transcription/corrections');
 const segmentAlign = require('./src/transcription/segmentAlign');
 const SEGMENT_ALIGN_CONFIG = segmentAlign.loadConfig();
 const { v4: uuidv4 } = require('uuid');
@@ -2869,7 +2870,7 @@ function transcribeByMode(audioPath, callback) {
 }
 
 // Clean up the audio, run `transcribeFn(audioPath, wasPreprocessed, done)`,
-// then strip hallucinations before handing the text to `callback`.
+// then strip hallucinations and apply transcript fixes before handing the text to `callback`.
 async function runTranscriptionPipeline(sourcePath, knownDurationSec, callback, transcribeFn) {
   const pre = await audioPreprocess.preprocessAudio(sourcePath, AUDIO_PREPROCESS_CONFIG);
   const durationSec = pre ? pre.durationSec : knownDurationSec;
@@ -2880,7 +2881,12 @@ async function runTranscriptionPipeline(sourcePath, knownDurationSec, callback, 
     if (reason) {
       logger.info(`Transcript filter (${reason}) on ${path.basename(sourcePath)}: "${text}" -> "${cleaned}"`);
     }
-    callback(cleaned);
+    // Fix words the transcriber reliably mishears (data/transcript_corrections.txt)
+    const fixed = transcriptCorrections.applyCorrections(cleaned, logger);
+    if (fixed.applied.length) {
+      logger.info(`Transcript fixes on ${path.basename(sourcePath)}: ${fixed.applied.map((a) => `${a.heard} -> ${a.replacement}`).join(', ')}`);
+    }
+    callback(fixed.text);
   });
 }
 

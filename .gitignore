@@ -49,3 +49,7 @@ public/summary.json
 
 # Old Python virtualenv backups
 .venv-*/
+
+# Transcript fixes (edited in Settings; the shipped list is data/transcript_corrections.default.txt)
+data/transcript_corrections.txt
+data/transcript_corrections.txt.tmp
