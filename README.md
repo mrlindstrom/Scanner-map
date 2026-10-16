@@ -96,6 +96,14 @@ Settings: `STORAGE_SAVE_*`, `STORAGE_FALLBACK_*`, `STORAGE_OUTAGE_COOLDOWN_SEC`.
   - Stays readable at every zoom level
 
 ### 💬 Discord
+- **More useful call messages.** Each call in a channel's rolling message shows:
+  - the speaker, the time (in each viewer's own timezone), the length and an audio link
+  - the transcript, with matched keywords in **bold**
+  - 📍 the extracted address (opens Google Maps) and a 🗺️ link that opens Scanner Map on that call (`/?call=<id>`)
+  - 🏷️ the call category, added a few seconds later once the map has assigned it
+  - 🔔 any detected tone and 🔑 any matched keywords
+
+  The embed colour shows the most serious call in it: red for an emergency flag, orange for a tone, amber for a keyword, blue for a located call. Merged calls use the same layout, with one line per speaker, and now get the Listen Live / Ask AI buttons too. Keyword alerts show the same call details plus a jump link.
 - **Listen Live works again.** Upgraded to `@discordjs/voice` 0.19, which supports Discord's DAVE voice encryption; without it the bot joins voice but nobody hears it.
 - Playback is more reliable:
   - waits for the voice connection to be ready

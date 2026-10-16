@@ -2588,14 +2588,33 @@ function loadCalls(hours) {
                 updateHeatmap();
             }
             
-            // Fit map to markers
-            fitMapToMarkers();
-            
+            // Fit map to markers, unless the page was opened on a specific call
+            if (!focusLinkedCall()) fitMapToMarkers();
+
             console.log(`[DEBUG] loadCalls completed successfully`);
         })
         .catch(error => {
             console.error('[DEBUG] Error loading calls:', error);
         });
+}
+
+// Links such as /?call=123 (from Discord messages) open the map on that call.
+// Only handled on the first load; returns true if the map was moved.
+let linkedCallHandled = false;
+function focusLinkedCall() {
+    if (linkedCallHandled) return false;
+    linkedCallHandled = true;
+    let callId;
+    try { callId = new URLSearchParams(window.location.search).get('call'); } catch (e) { return false; }
+    if (!callId) return false;
+    const data = allMarkers[callId];
+    if (!data || !data.marker) {
+        console.warn(`Linked call ${callId} isn't in the current time range or has no location`);
+        return false;
+    }
+    map.setView(data.marker.getLatLng(), Math.min(17, map.getMaxZoom()));
+    markerGroups.zoomToShowLayer(data.marker, () => data.marker.openPopup());
+    return true;
 }
 
 function fitMapToMarkers() {

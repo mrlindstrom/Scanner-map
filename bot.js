@@ -121,7 +121,8 @@ const bcrypt = require('bcryptjs');
 const { createStorage, isDbMode, buildKey } = require('./src/storage');
 const pendingUploads = require('./src/storage/pendingUploads');
 const { runMigrations } = require('./src/db/migrations');
-const { audioUrl: buildAudioUrl } = require('./src/utils/publicUrl');
+const { audioUrl: buildAudioUrl, getPublicBaseUrl } = require('./src/utils/publicUrl');
+const callEmbeds = require('./src/discord/callEmbeds');
 const audioPreprocess = require('./src/transcription/audioPreprocess');
 const hallucinationFilter = require('./src/transcription/hallucinationFilter');
 const segmentAlign = require('./src/transcription/segmentAlign');
@@ -289,6 +290,9 @@ function shouldCheckForAddress(talkGroupID, transcriptionId, systemName) {
 }
 
 // One-line summary of a tone hit from tone_detect.py (icad-tone-detection result dicts)
+// Tones found per call (transcription ID -> { descriptions, at }), shown in its Discord message
+const callTones = new Map();
+
 function describeTone(tone) {
   const secs = (v) => (Number.isFinite(parseFloat(v)) ? `${parseFloat(v).toFixed(1)}s` : '?s');
   if (tone.type === 'hi-low' && Array.isArray(tone.detected)) {
@@ -312,6 +316,10 @@ function describeTone(tone) {
 
 function handleToneDetectionResult(hasTwoTone, detectedTones, transcriptionId, talkGroupID, detectedType = 'unknown') {
   if (hasTwoTone) {
+    callTones.set(String(transcriptionId), {
+      descriptions: callEmbeds.describeTones(detectedType, (detectedTones || []).map(describeTone)),
+      at: Date.now(),
+    });
     lastTwoToneTime = Date.now();
     lastDetectedToneGroup = talkGroupID; // Store which talk group had the tone
     
@@ -3202,11 +3210,19 @@ function handleNewAudio(audioData) {
                     logger.info(`Updated DB transcription for ID ${transcriptionId}`);
 
                     // Now handle the logic that uses the transcription - WAIT for it to complete
+                    // rdio-scanner uploads don't include call_length; measure the audio
+                    let callLengthForMessage = call_length;
+                    if (!(parseFloat(callLengthForMessage) > 0)) {
+                      callLengthForMessage = await new Promise((resolve) => {
+                        getAudioDuration(finalPathIfLocal || tempPath, (durErr, dur) => resolve(durErr ? null : dur));
+                      });
+                    }
+
                     await handleNewTranscription(
                       transcriptionId, transcriptionText, talkGroupID, systemName,
                       talkGroupName, source, talkerAlias, talkGroupGroup, storagePath, // Pass storagePath
                       totalErrors, totalSpikes, // <-- Pass error/spike counts
-                      emergency, priority, encrypted, call_length, // <-- Pass call metadata
+                      emergency, priority, encrypted, callLengthForMessage, // <-- Pass call metadata
                       freq_error, signalQuality, // <-- Pass signal quality
                       frequency, start_time, stop_time, // <-- Pass timing/frequency
                       tdma_slot, phase2_tdma, color_code // <-- Pass TDMA/color code
@@ -4036,27 +4052,15 @@ async function processMergedCallSegments(
     .join(' ')
     .trim();
   
-  // Build combined transcription lines for Discord (all segments in one message)
-  const audioUrl = buildAudioUrl(transcriptionId);
-  const transcriptionLines = [];
-  
-  for (const segment of sortedSegments) {
-    if (!segment.transcription || segment.transcription.trim() === '') {
-      continue; // Skip empty segments
-    }
-    
-    const sqInfo = (segment.errors > 0 || segment.spikes > 0) 
-      ? ` _(SQ: ${segment.errors}E/${segment.spikes}S)_` 
-      : '';
-    
-    // Format: **SourceDisplay** (SQ: XE/YS): transcription text
-    const line = `**${segment.sourceDisplay}**${sqInfo}: ${segment.transcription}`;
-    transcriptionLines.push(line);
-  }
-  
-  // Combine all lines into one description with audio link at the end
-  const combinedTranscription = transcriptionLines.join('\n\n') + ` [Audio](${audioUrl})`;
-  
+  // One speaker line per segment in the Discord message
+  const speakers = sortedSegments
+    .filter((seg) => seg.transcription && seg.transcription.trim() !== '')
+    .map((seg) => ({
+      name: seg.sourceDisplay,
+      text: seg.transcription.trim(),
+      sq: seg.errors > 0 || seg.spikes > 0 ? `${seg.errors}E/${seg.spikes}S` : null,
+    }));
+
   // Update database with combined transcription
   updateTranscription(transcriptionId, fullTranscription, async () => {
     logger.info(`Updated DB transcription for merged call ID ${transcriptionId}`);
@@ -4076,27 +4080,21 @@ async function processMergedCallSegments(
       return;
     }
     
-    const segmentSource = firstSegment.sourceId ? firstSegment.sourceId.toString() : 'Unknown';
-    const segmentTalkerAlias = firstSegment.sourceDisplay.includes('Unit-') ? null : firstSegment.sourceDisplay;
-    
-    // Calculate total errors/spikes across all segments
-    const totalErrors = sortedSegments.reduce((sum, seg) => sum + (seg.errors || 0), 0);
-    const totalSpikes = sortedSegments.reduce((sum, seg) => sum + (seg.spikes || 0), 0);
-    
-    // Send as a merged call (use special handling to bypass normal message construction)
-    const mergedMessageUrl = await sendMergedCallMessage(
-      talkGroupID,
-      talkGroupName,
-      combinedTranscription, // Pre-formatted with all segments
-      systemName,
-      transcriptionId,
-      talkGroupGroup
-    );
-    
-    // Keyword alerts on the combined text, attributed to the first speaker with text
+    const details = await gatherCallDetails(transcriptionId, fullTranscription, talkGroupID);
+    const lastSegment = sortedSegments[sortedSegments.length - 1];
+    const entry = buildCallEntry({
+      id: transcriptionId,
+      speakers,
+      details,
+      durationSec: lastSegment && lastSegment.endPos,
+      startTime: null,
+    });
+    const mergedMessageUrl = await postCallMessage(entry, talkGroupID, talkGroupName, systemName);
+    scheduleCategoryRefresh(entry);
+
+    // Keyword alerts on the combined text
     try {
-      await alertOnKeywords(transcriptionId, fullTranscription, talkGroupID, talkGroupName, systemName,
-        segmentSource, segmentTalkerAlias, mergedMessageUrl || null);
+      await alertOnKeywords(entry, talkGroupName, systemName, mergedMessageUrl || null);
     } catch (error) {
       logger.error(`Error checking keywords for merged call ID ${transcriptionId}: ${error.message}`, { stack: error.stack });
     }
@@ -4203,30 +4201,33 @@ async function analyzeCall(id, transcriptionText, talkGroupID, talkGroupName, sy
 
 // Keyword alerts shared by normal and merged calls; messageUrl links the alert
 // back to the call's Discord message.
-async function alertOnKeywords(id, transcriptionText, talkGroupID, talkGroupName, systemName, source, talkerAlias, messageUrl) {
-  const matchedKeywords = await new Promise((resolve, reject) => {
-    checkForKeywords(talkGroupID, transcriptionText, (keywords) => {
-      if (keywords) resolve(keywords);
-      else reject(new Error('Error checking keywords'));
-    });
-  });
-
-  logger.info(`Matched keywords for ID ${id}: ${matchedKeywords.join(', ') || 'None'}`);
-
-  if (matchedKeywords.length > 0 && alertChannel) {
-    logger.info(`Sending alert message for ID ${id}`);
-    await sendAlertMessage(
-      talkGroupID,
-      talkGroupName,
-      transcriptionText,
-      systemName,
-      source,
-      talkerAlias,
-      id,  // Pass the numeric ID here too
-      matchedKeywords,
-      messageUrl
-    );
+async function alertOnKeywords(entry, talkGroupName, systemName, messageUrl) {
+  const matched = (entry.details && entry.details.keywords) || [];
+  logger.info(`Matched keywords for ID ${entry.id}: ${matched.join(', ') || 'None'}`);
+  if (matched.length > 0 && alertChannel) {
+    await sendAlertMessage(entry, talkGroupName, systemName, messageUrl);
   }
+}
+
+// TrunkRecorder/SDRTrunk flags arrive as booleans, numbers or strings
+function isFlagSet(value) {
+  return value === true || value === 1 || /^(true|1|yes)$/i.test(String(value ?? '').trim());
+}
+
+// Everything a call's Discord block shows (see src/discord/callEmbeds.js)
+function buildCallEntry({ id, speakers, details, durationSec, startTime, emergency, encrypted }) {
+  const start = parseInt(startTime ?? details.timestamp, 10);
+  return {
+    id,
+    time: Number.isFinite(start) && start > 1e9 ? start : Math.floor(Date.now() / 1000),
+    durationSec: parseFloat(durationSec),
+    audioUrl: buildAudioUrl(id),
+    mapUrl: details.lat != null && details.lon != null ? scannerMapCallUrl(id) : null,
+    emergency: isFlagSet(emergency),
+    encrypted: isFlagSet(encrypted),
+    speakers,
+    details,
+  };
 }
 
 async function handleNewTranscription(
@@ -4265,45 +4266,25 @@ async function handleNewTranscription(
     // Two-tone queueing, address extraction and tone detection
     await analyzeCall(id, transcriptionText, talkGroupID, talkGroupName, systemName, audioFilePath);
 
-    // Store the message URL
-    let messageUrl = null;
-    
-    // Update to capture the URL from the callback
-    // IMPORTANT: Pass the numeric ID for the audio URL, not talkGroupName
-    await new Promise((resolve) => {
-      sendTranscriptionMessage(
-        talkGroupID, 
-        talkGroupName, 
-        transcriptionText, 
-        systemName, 
-        source, 
-        talkerAlias,
-        id,  // This is the actual numeric ID that should be used for the audio URL
-        talkGroupGroup, 
-        totalErrors, // <-- Error count
-        totalSpikes, // <-- Spike count
-        emergency, // <-- Emergency flag
-        priority, // <-- Priority level
-        encrypted, // <-- Encryption status
-        call_length, // <-- Call length in seconds
-        freq_error, // <-- Frequency error
-        signalQuality, // <-- Signal quality object
-        frequency, // <-- Frequency
-        start_time, // <-- Start time
-        stop_time, // <-- Stop time
-        tdma_slot, // <-- TDMA slot
-        phase2_tdma, // <-- Phase 2 TDMA
-        color_code, // <-- Color code
-        undefined, // <-- No cache bypass for normal calls
-        (url) => {
-          messageUrl = url;
-          resolve();
-        }
-      );
+    const details = await gatherCallDetails(id, transcriptionText, talkGroupID);
+    const entry = buildCallEntry({
+      id,
+      speakers: [{
+        name: sourceDisplayName(source, talkerAlias),
+        text: transcriptionText,
+        sq: totalErrors > 0 || totalSpikes > 0 ? `${totalErrors}E/${totalSpikes}S` : null,
+      }],
+      details,
+      durationSec: call_length,
+      startTime: start_time,
+      emergency,
+      encrypted,
     });
+    const messageUrl = await postCallMessage(entry, talkGroupID, talkGroupName, systemName);
+    scheduleCategoryRefresh(entry);
 
-    // Check for keywords and send alert with the message URL
-    await alertOnKeywords(id, transcriptionText, talkGroupID, talkGroupName, systemName, source, talkerAlias, messageUrl);
+    // Keyword alert linking back to the message
+    await alertOnKeywords(entry, talkGroupName, systemName, messageUrl);
 
     if (isTalkGroupLive(talkGroupID)) {
       playAudioForTalkGroup(talkGroupID, id);
@@ -4434,93 +4415,68 @@ function checkForKeywords(talkGroupID, transcriptionText, callback) {
   );
 }
 
-function sendAlertMessage(
-  talkGroupID,
-  talkGroupName,
-  transcriptionText,
-  systemName,
-  source,
-  talkerAlias,
-  audioID,
-  matchedKeywords,
-  messageUrl,
-  callback
-) {
-  // Look up the audio_id from the database for this transcription
-  db.get('SELECT id FROM audio_files WHERE transcription_id = ?', [audioID], (err, row) => {
-    // Use transcription ID as fallback if audio ID not found
-    const actualAudioID = (err || !row) ? audioID : row.id;
-    
-    // Create a URL for the audio file
-    const audioUrl = buildAudioUrl(actualAudioID);
-    
-    // Log the IDs for debugging
-    logger.info(`Alert - Transcription ID: ${audioID}, Audio ID: ${actualAudioID}, URL: ${audioUrl}`);
-    
-    // Format source display name - prioritize talkerAlias over source
-    let sourceDisplay;
-    if (talkerAlias && talkerAlias.trim() !== '') {
-      // Use talkerAlias when available (from SDRTrunk)
-      sourceDisplay = talkerAlias;
-    } else if (!source || source === 'Unknown') {
-      sourceDisplay = 'User-Unknown';
-    } else if (source.startsWith('TR-')) {
-      sourceDisplay = `TrunkRec-${source.substring(3)}`;
-    } else if (/^\d+$/.test(source)) {
-      sourceDisplay = `Unit-${source}`;
-    } else {
-      sourceDisplay = `ID-${source}`;
-    }
-    
-    const formattedTranscription = `**${sourceDisplay}**\n${transcriptionText}`;
-    
-    const embed = new EmbedBuilder()
-      .setTitle(`🚨 Alert from ${talkGroupName}`)
-      .setDescription(`**Matched Keywords:** ${matchedKeywords.join(', ')}`)
-      .setTimestamp()
-      .setColor(0xff0000);
-    
-    // Prepare the fields to be added
-    const fields = [
-      { name: 'Transcription', value: formattedTranscription },
-      { name: 'System', value: systemName || 'Unknown', inline: true },
-      { 
-        name: 'Links', 
-        value: `[🔊 Listen to Audio](${audioUrl})\n[↗️ Jump to Message](${messageUrl})`, 
-        inline: false
-      }
-    ];
-    
-    // Validate and add the fields
-    validateAndAddFields(embed, fields);
-    
-    // Send the embed message
-    alertChannel
-      .send({ embeds: [embed] })
-      .then(() => {
-        logger.info('Alert message sent successfully');
-        if (callback) callback();
-      })
-      .catch((err) => {
-        logger.error('Error sending alert message:', err);
-        if (callback) callback();
-      });
-  });
+// Keyword alert: the call's block (same as in its channel) plus a link to it
+function sendAlertMessage(entry, talkGroupName, systemName, messageUrl) {
+  const keywords = (entry.details && entry.details.keywords) || [];
+  let description = callEmbeds.renderCall(entry);
+  if (messageUrl) description += `\n\n[↗️ Jump to message](${messageUrl})`;
+  const embed = new EmbedBuilder()
+    .setTitle(`🔑 ${keywords.join(', ')} · ${talkGroupName}`.slice(0, 256))
+    .setDescription(description.slice(0, callEmbeds.MAX_DESCRIPTION))
+    .setColor(entry.emergency ? callEmbeds.COLORS.emergency : 0xff0000)
+    .setFooter({ text: systemName || 'Unknown system' })
+    .setTimestamp();
+  return alertChannel
+    .send({ embeds: [embed] })
+    .then(() => logger.info(`Alert message sent for call ${entry.id}`))
+    .catch((err) => logger.error('Error sending alert message:', err));
 }
 
-// Function to send a merged call message (all segments in one embed)
-// Uses message cache so multiple merged calls within 15s combine into same embed
-async function sendMergedCallMessage(
-  talkGroupID,
-  talkGroupName,
-  combinedTranscription, // Pre-formatted with all segments and audio link
-  systemName,
-  transcriptionId,
-  talkGroupGroup
-) {
+// --- Call messages ------------------------------------------------------------
+// Each talkgroup channel gets a rolling message: calls within MESSAGE_COOLDOWN
+// of the previous one are appended to the same embed. The message keeps its
+// calls as structured entries (see src/discord/callEmbeds.js) and is re-rendered
+// on every change, so details that arrive later (the map category) can be
+// filled in by editing it.
+
+const callMessageStates = new Map(); // transcription ID -> message state, for later edits
+const CATEGORY_REFRESH_DELAYS_MS = [8000, 20000, 45000]; // the web server categorizes mapped calls a few seconds after geocoding
+
+function sourceDisplayName(source, talkerAlias) {
+  if (talkerAlias && talkerAlias.trim() !== '') return talkerAlias.trim();
+  if (!source || source === 'Unknown') return 'Unknown radio';
+  if (source.startsWith('TR-')) return `TrunkRec-${source.substring(3)}`;
+  if (/^\d+$/.test(source)) return `Unit-${source}`;
+  return `ID-${source}`;
+}
+
+function scannerMapCallUrl(transcriptionId) {
+  return `${getPublicBaseUrl()}/?call=${encodeURIComponent(transcriptionId)}`;
+}
+
+// Address, category, tones and keywords known for a call right now.
+async function gatherCallDetails(id, transcriptionText, talkGroupID) {
+  const row = await new Promise((resolve) => {
+    db.get('SELECT address, lat, lon, category, timestamp FROM transcriptions WHERE id = ?', [id],
+      (err, r) => resolve(err ? null : r));
+  });
+  const keywords = await new Promise((resolve) => checkForKeywords(talkGroupID, transcriptionText, resolve));
+  const tone = callTones.get(String(id));
+  return {
+    address: row ? row.address : null,
+    lat: row ? row.lat : null,
+    lon: row ? row.lon : null,
+    category: row ? row.category : null,
+    timestamp: row ? row.timestamp : null, // call start (unix seconds)
+    tones: tone ? tone.descriptions : [],
+    keywords: keywords || [],
+  };
+}
+
+// The talkgroup's text channel (and its display name), creating it if needed.
+function resolveCallChannel(talkGroupID, talkGroupName, systemName) {
   return new Promise((resolve) => {
-    // Get the full talkgroup name and county from the database, scoped to the
-    // originating system (falls back to legacy ''-system rows for single-system).
+    // Scoped to the originating system (falls back to legacy ''-system rows for single-system)
     const sysKey = normalizeSystemLabel(systemName);
     db.get(
       `SELECT alpha_tag, county FROM talk_groups
@@ -4529,103 +4485,26 @@ async function sendMergedCallMessage(
       [talkGroupID, sysKey, sysKey],
       (err, row) => {
         if (err) {
-          logger.error('Error fetching talkgroup info for merged call:', err);
-          resolve();
-          return;
+          logger.error('Error fetching talkgroup info:', err);
+          return resolve(null);
         }
-
         if (!row) {
-          logger.error(`No talk group found for merged call ID: ${talkGroupID} (system: ${sysKey || 'n/a'})`);
-          resolve();
-          return;
+          // Not in the imported CSV(s): post under "Uncategorized" with the scanner's name
+          logger.warn(`Talkgroup ${talkGroupID} (system: ${sysKey || 'n/a'}) not in DB — posting under "Uncategorized" using scanner-provided name. Import its CSV for proper mapping.`);
+          row = { alpha_tag: talkGroupName || `TG ${talkGroupID}`, county: null };
         }
-
         const fullTalkGroupName = row.alpha_tag || talkGroupName || `TG ${talkGroupID}`;
-        const categoryName = row.county || 'Uncategorized';
-
-        // Determine the channel name
-        const channelName = getChannelName(fullTalkGroupName);
-
-        // Get or create the category
-        getOrCreateCategory(categoryName, (category) => {
+        getOrCreateCategory(row.county || 'Uncategorized', (category) => {
           if (!category) {
-            logger.error('Failed to get or create category for merged call.');
-            resolve();
-            return;
+            logger.error('Failed to get or create category.');
+            return resolve(null);
           }
-
-          // Get or create the channel within the category
-          getOrCreateChannel(channelName, category.id, (channel) => {
+          getOrCreateChannel(getChannelName(fullTalkGroupName), category.id, (channel) => {
             if (!channel) {
-              logger.error('Failed to get or create channel for merged call.');
-              resolve();
-              return;
+              logger.error('Failed to get or create channel.');
+              return resolve(null);
             }
-
-            const cacheKey = channel.id;
-            const cachedMessage = messageCache.get(cacheKey);
-            const currentTime = Date.now();
-            const MAX_DESC_LENGTH = 4096; // Discord embed description limit
-
-            // Check if we have a recent message for this channel within cooldown
-            if (cachedMessage && currentTime - cachedMessage.timestamp < MESSAGE_COOLDOWN) {
-              // Try to append to the existing message
-              const existingEmbed = cachedMessage.message.embeds[0];
-              if (existingEmbed) {
-                const existingDescription = existingEmbed.description || '';
-                const separator = '\n\n---\n\n'; // Visual separator between merged calls
-                const newDescription = existingDescription + separator + combinedTranscription;
-
-                // Check if the new description exceeds the limit
-                if (newDescription.length <= MAX_DESC_LENGTH) {
-                  const updatedEmbed = EmbedBuilder.from(existingEmbed)
-                    .setDescription(newDescription)
-                    .setTimestamp();
-
-                  cachedMessage.message.edit({ embeds: [updatedEmbed] })
-                    .then((editedMsg) => {
-                      logger.info(`Appended merged call ${transcriptionId} to existing message in ${channel.name}`);
-                      messageCache.set(cacheKey, {
-                        message: editedMsg,
-                        timestamp: currentTime
-                      });
-                      resolve(editedMsg.url);
-                    })
-                    .catch((err) => {
-                      logger.error('Error editing merged call message:', err);
-                      // Fall through to send new message
-                      sendNewMergedMessage();
-                    });
-                  return;
-                }
-              }
-            }
-
-            // Send a new message
-            sendNewMergedMessage();
-
-            function sendNewMergedMessage() {
-              const embed = new EmbedBuilder()
-                .setTitle(fullTalkGroupName)
-                .setDescription(combinedTranscription)
-                .setTimestamp()
-                .setColor(0x00ff00);
-
-              channel.send({ embeds: [embed] })
-                .then((sentMsg) => {
-                  logger.info(`Sent merged call message for ID ${transcriptionId}, URL: ${sentMsg.url}`);
-                  // Cache this message for potential combining
-                  messageCache.set(cacheKey, {
-                    message: sentMsg,
-                    timestamp: currentTime
-                  });
-                  resolve(sentMsg.url);
-                })
-                .catch((err) => {
-                  logger.error('Error sending merged call message:', err);
-                  resolve();
-                });
-            }
+            resolve({ channel, fullTalkGroupName });
           });
         });
       }
@@ -4633,239 +4512,113 @@ async function sendMergedCallMessage(
   });
 }
 
-function sendTranscriptionMessage(
-  talkGroupID,
-  talkGroupName,
-  transcriptionText,
-  systemName,
-  source,
-  talkerAlias,
-  audioID, // This is the transcription ID
-  talkGroupGroup,
-  totalErrors, // <-- Error count
-  totalSpikes, // <-- Spike count
-  emergency, // <-- Emergency flag
-  priority, // <-- Priority level
-  encrypted, // <-- Encryption status
-  call_length, // <-- Call length in seconds
-  freq_error, // <-- Frequency error
-  signalQuality, // <-- Signal quality object {signal, noise, snr}
-  frequency, // <-- Frequency
-  start_time, // <-- Start time
-  stop_time, // <-- Stop time
-  tdma_slot, // <-- TDMA slot
-  phase2_tdma, // <-- Phase 2 TDMA
-  color_code, // <-- Color code
-  cacheBypassId, // <-- Optional: unique ID to bypass message cache (for merged segments)
-  callback // Callback to pass the message URL back
-) {
-  // Get the full talkgroup name and county from the database, scoped to the
-  // originating system (falls back to legacy ''-system rows for single-system).
-  const sysKey = normalizeSystemLabel(systemName);
-  db.get(
-    `SELECT alpha_tag, county FROM talk_groups
-     WHERE id = ? AND (system = ? OR system = '')
-     ORDER BY CASE WHEN system = ? THEN 0 ELSE 1 END LIMIT 1`,
-    [talkGroupID, sysKey, sysKey],
-    (err, row) => {
-      if (err) {
-        logger.error('Error fetching talkgroup info:', err);
-        if (callback) callback(); // Ensure callback is called even on error
-        return;
-      }
-
-      if (!row) {
-        // Talkgroup isn't in the imported CSV(s). Rather than dropping the call,
-        // fall back to the name the scanner provided so it still posts to Discord.
-        // (Import this talkgroup's CSV for proper county/category mapping.)
-        logger.warn(`Talkgroup ${talkGroupID} (system: ${sysKey || 'n/a'}) not in DB — posting under "Uncategorized" using scanner-provided name. Import its CSV for proper mapping.`);
-        row = { alpha_tag: talkGroupName || `TG ${talkGroupID}`, county: null };
-      }
-
-      const fullTalkGroupName = row.alpha_tag || talkGroupName || `TG ${talkGroupID}`; // Use provided name as fallback
-      const categoryName = row.county || 'Uncategorized'; // Use county for category
-
-      // Determine the channel name (full talk group name, sanitized)
-      const channelName = getChannelName(fullTalkGroupName);
-
-      // Get or create the category
-      getOrCreateCategory(categoryName, (category) => {
-        if (!category) {
-          logger.error('Failed to get or create category.');
-          if (callback) callback(); // Ensure callback is called even on error
-          return;
-        }
-
-        // Get or create the channel within the category
-        getOrCreateChannel(channelName, category.id, (channel) => {
-          if (!channel) {
-            logger.error('Failed to get or create channel.');
-            if (callback) callback(); // Ensure callback is called even on error
-            return;
-          }
-
-          // Look up the audio_id from the database for this transcription
-          // Note: We use transcription ID (`audioID` parameter) for the URL now
-          // as audio_files might get cleaned up.
-          // The audio server route /audio/:id expects the transcription ID.
-          const audioUrl = buildAudioUrl(audioID);
-
-          // Log the ID and URL for debugging
-          logger.info(`Creating link for Transcription ID: ${audioID}, Audio URL: ${audioUrl}`);
-
-          // Format source display name - prioritize talkerAlias over source
-          let sourceDisplay;
-          if (talkerAlias && talkerAlias.trim() !== '') {
-            // Use talkerAlias when available (from SDRTrunk)
-            sourceDisplay = talkerAlias;
-          } else if (!source || source === 'Unknown') {
-            sourceDisplay = 'User-Unknown';
-          } else if (source.startsWith('TR-')) {
-            sourceDisplay = `TrunkRec-${source.substring(3)}`;
-          } else if (/^\d+$/.test(source)) {
-            sourceDisplay = `Unit-${source}`;
-          } else {
-            sourceDisplay = `ID-${source}`;
-          }
-
-          // Format transcription line with bold source and italicized SQ
-          let signalQualityInfo = '';
-          if (totalErrors > 0 || totalSpikes > 0) {
-            signalQualityInfo = ` _(SQ: ${totalErrors}E/${totalSpikes}S)_`;
-          }
-          const transcriptionLine = `**${sourceDisplay}**${signalQualityInfo}: ${transcriptionText} [Audio](${audioUrl})`;
-
-          // --- Start Modified Block for Length Check ---
-
-          // For merged call segments, use a unique cache key to prevent combining
-          // cacheBypassId is passed for merged segments to ensure they don't get combined
-          const isMergedSegment = cacheBypassId !== undefined && cacheBypassId !== null;
-          const cacheKey = isMergedSegment 
-            ? `${channel.id}_${cacheBypassId}` // Unique key for merged segments
-            : channel.id; // Normal cache key for regular calls
-          
-          const cachedMessage = messageCache.get(cacheKey);
-          const currentTime = Date.now();
-          const MAX_DESC_LENGTH = 4096; // Discord embed description limit
-
-          // Check if we have a recent message for this channel
-          // Skip cache for merged segments - they should always be separate messages
-          if (!isMergedSegment && cachedMessage && currentTime - cachedMessage.timestamp < MESSAGE_COOLDOWN) {
-            // Calculate potential new length BEFORE concatenating
-            const potentialNewTranscription = cachedMessage.transcriptions + '\n\n' + transcriptionLine;
-
-            if (potentialNewTranscription.length <= MAX_DESC_LENGTH) {
-              // It fits! Update the existing message
-              const updatedTranscription = potentialNewTranscription;
-              const embed = cachedMessage.message.embeds[0];
-
-              // Use try-catch around embed modification as belt-and-suspenders
-              try {
-                const newEmbed = EmbedBuilder.from(embed)
-                  .setDescription(updatedTranscription) // Safe to set now
-                  .setTimestamp();
-
-                cachedMessage.message.edit({ embeds: [newEmbed] })
-                  .then((editedMsg) => {
-                    // Update the cache with the new combined data
-                    const transcriptionIds = cachedMessage.transcriptionIds || [];
-                    if (!transcriptionIds.includes(audioID)) {
-                      transcriptionIds.push(audioID);
-                    }
-                    messageCache.set(cacheKey, {
-                      message: editedMsg,
-                      timestamp: currentTime,
-                      transcriptions: updatedTranscription, // Store the combined text
-                      url: editedMsg.url,
-                      transcriptionIds: transcriptionIds
-                    });
-                    logger.info(`Updated message with transcription ID ${audioID}, URL: ${editedMsg.url}`);
-                    if (callback) {
-                      callback(editedMsg.url); // Pass back the message URL
-                    }
-                  })
-                  .catch((err) => {
-                    logger.error('Error editing message:', err);
-                    // If editing fails, clear cache and send a new message as fallback
-                    messageCache.delete(cacheKey);
-                    sendNewTranscriptionMessage(channel, fullTalkGroupName, transcriptionLine, talkGroupID, audioID, callback, emergency, priority, encrypted, call_length, freq_error, signalQuality, frequency, start_time, stop_time, tdma_slot, phase2_tdma, color_code);
-                  });
-
-              } catch (embedError) {
-                 // This catch block handles potential errors during .from() or .setDescription() itself
-                 logger.error('Error modifying embed description (pre-edit):', embedError);
-                 messageCache.delete(cacheKey); // Clear cache entry
-                 sendNewTranscriptionMessage(channel, fullTalkGroupName, transcriptionLine, talkGroupID, audioID, callback, emergency, priority, encrypted, call_length, freq_error, signalQuality, frequency, start_time, stop_time, tdma_slot, phase2_tdma, color_code);
-              }
-
-            } else {
-              // Combined content is too long, send a NEW message instead of editing
-              logger.info(`Combined description too long (${potentialNewTranscription.length} > ${MAX_DESC_LENGTH}). Sending new message.`);
-              // Invalidate the cache for this channel so the next message *is* new
-              messageCache.delete(cacheKey);
-              // Call the refactored function to send a new message
-              sendNewTranscriptionMessage(channel, fullTalkGroupName, transcriptionLine, talkGroupID, audioID, callback, emergency, priority, encrypted, call_length, freq_error, signalQuality, frequency, start_time, stop_time, tdma_slot, phase2_tdma, color_code);
-            }
-          } else {
-             // No recent cached message OR the previous attempt decided to send a new one
-             // Call the refactored function to send a new message
-             sendNewTranscriptionMessage(channel, fullTalkGroupName, transcriptionLine, talkGroupID, audioID, callback, emergency, priority, encrypted, call_length, freq_error, signalQuality, frequency, start_time, stop_time, tdma_slot, phase2_tdma, color_code);
-          }
-
-          // --- End Modified Block ---
-        });
-      });
-    }
+function callMessageButtons(talkGroupID) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`listen_live_${talkGroupID}`).setLabel('🎧 Listen Live').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`ask_ai_${talkGroupID}`).setLabel('🤖 Ask AI').setStyle(ButtonStyle.Secondary),
   );
 }
 
-//function to handle sending a fresh message
-function sendNewTranscriptionMessage(channel, fullTalkGroupName, transcriptionLine, talkGroupID, audioID, callback, emergency, priority, encrypted, call_length, freq_error, signalQuality, frequency, start_time, stop_time, tdma_slot, phase2_tdma, color_code) {
-    const listenLiveButton = new ButtonBuilder()
-      .setCustomId(`listen_live_${talkGroupID}`)
-      .setLabel('🎧 Listen Live')
-      .setStyle(ButtonStyle.Primary);
+function buildCallEmbed(state) {
+  const { description, color, footer } = callEmbeds.renderMessage(state.entries, { systemName: state.systemName });
+  return new EmbedBuilder()
+    .setTitle(state.title)
+    .setDescription(description)
+    .setColor(color)
+    .setFooter({ text: footer })
+    .setTimestamp();
+}
 
-    const askAIButton = new ButtonBuilder() // <-- Add this button
-      .setCustomId(`ask_ai_${talkGroupID}`)
-      .setLabel('🤖 Ask AI')
-      .setStyle(ButtonStyle.Secondary);
+// Fields getMessageUrlForTranscription() reads from the cache
+function syncStateCacheFields(state) {
+  state.transcriptions = state.entries.map(callEmbeds.renderCall).join('\n\n');
+  state.transcriptionIds = state.entries.map((e) => e.id);
+}
 
-    const row = new ActionRowBuilder().addComponents(listenLiveButton, askAIButton); // <-- Add the new button here
+/**
+ * Post a call to its talkgroup channel, appending to the recent message when it
+ * fits. Resolves with the message URL (or undefined on failure).
+ */
+async function postCallMessage(entry, talkGroupID, talkGroupName, systemName) {
+  const target = await resolveCallChannel(talkGroupID, talkGroupName, systemName);
+  if (!target) return undefined;
+  const { channel, fullTalkGroupName } = target;
 
-    // Create the embed for a new message
-    // Only include talker tag/ID and SQ in the transcription line itself, no additional metadata fields
-    const embed = new EmbedBuilder()
-      .setTitle(fullTalkGroupName)
-      .setDescription(transcriptionLine) // Description contains talker tag/ID, SQ, and transcription
-      .setTimestamp()
-      .setColor(0x00ff00);
+  const cached = messageCache.get(channel.id);
+  const now = Date.now();
+  if (cached && cached.entries && now - cached.timestamp < MESSAGE_COOLDOWN) {
+    const candidate = [...cached.entries, entry];
+    const { description } = callEmbeds.renderMessage(candidate, { systemName: cached.systemName });
+    if (description.length <= callEmbeds.MAX_DESCRIPTION) {
+      cached.entries = candidate;
+      try {
+        const edited = await cached.message.edit({ embeds: [buildCallEmbed(cached)] });
+        cached.message = edited;
+        cached.timestamp = now;
+        syncStateCacheFields(cached);
+        callMessageStates.set(String(entry.id), cached);
+        logger.info(`Updated message with transcription ID ${entry.id}, URL: ${edited.url}`);
+        return edited.url;
+      } catch (err) {
+        logger.error(`Error editing message for transcription ID ${entry.id}: ${err.message}; sending a new one`);
+        cached.entries = cached.entries.filter((e) => e !== entry);
+      }
+    } else {
+      logger.info(`Message for ${channel.name} is full (${description.length} > ${callEmbeds.MAX_DESCRIPTION}); starting a new one`);
+    }
+  }
 
-    // Send the new message
-    channel.send({
-      embeds: [embed],
-      components: [row], // Use the row with both buttons
-    })
-      .then((msg) => {
-        const cacheKey = channel.id;
-        const currentTime = Date.now();
-        // Cache the new message, starting fresh
-        messageCache.set(cacheKey, {
-          message: msg,
-          timestamp: currentTime,
-          transcriptions: transcriptionLine, // Start with just the new line
-          url: msg.url,
-          transcriptionIds: [audioID] // Initialize with this transcription ID
-        });
-        logger.info(`Created new message with transcription ID ${audioID}, URL: ${msg.url}`);
-        if (callback) {
-          callback(msg.url); // Pass back the message URL
+  const state = {
+    title: fullTalkGroupName,
+    systemName,
+    entries: [entry],
+    message: null,
+    timestamp: now,
+    url: null,
+  };
+  try {
+    const msg = await channel.send({ embeds: [buildCallEmbed(state)], components: [callMessageButtons(talkGroupID)] });
+    state.message = msg;
+    state.url = msg.url;
+    syncStateCacheFields(state);
+    messageCache.set(channel.id, state);
+    callMessageStates.set(String(entry.id), state);
+    logger.info(`Created new message with transcription ID ${entry.id}, URL: ${msg.url}`);
+    return msg.url;
+  } catch (err) {
+    logger.error('Error sending new transcription message:', err);
+    return undefined;
+  }
+}
+
+// Mapped calls get a category from the web server shortly after geocoding;
+// check back a few times and add it to the message.
+function scheduleCategoryRefresh(entry) {
+  const d = entry.details || {};
+  if (d.category || d.lat == null || d.lon == null) return;
+  let attempt = 0;
+  const check = () => {
+    db.get('SELECT category FROM transcriptions WHERE id = ?', [entry.id], async (err, row) => {
+      const state = callMessageStates.get(String(entry.id));
+      if (!state || !state.message) return;
+      if (!err && row && row.category) {
+        entry.details.category = row.category;
+        try {
+          state.message = await state.message.edit({ embeds: [buildCallEmbed(state)] });
+          syncStateCacheFields(state);
+          logger.debug(`Added category "${row.category}" to the Discord message for call ${entry.id}`);
+        } catch (e) {
+          logger.warn(`Could not add category to the Discord message for call ${entry.id}: ${e.message}`);
         }
-      })
-      .catch((err) => {
-        logger.error('Error sending new transcription message:', err);
-        if (callback) callback();
-      });
+        return;
+      }
+      attempt++;
+      if (attempt < CATEGORY_REFRESH_DELAYS_MS.length) {
+        setTimeout(check, CATEGORY_REFRESH_DELAYS_MS[attempt] - CATEGORY_REFRESH_DELAYS_MS[attempt - 1]);
+      }
+    });
+  };
+  setTimeout(check, CATEGORY_REFRESH_DELAYS_MS[0]);
 }
 
 // Add a cleanup function to prevent memory leaks
@@ -4875,6 +4628,13 @@ function cleanupMessageCache() {
     if (currentTime - value.timestamp > MESSAGE_COOLDOWN * 2) {
       messageCache.delete(key);
     }
+  }
+  // Messages stop being edited (category follow-ups) after a few minutes
+  for (const [id, state] of callMessageStates.entries()) {
+    if (currentTime - state.timestamp > 5 * 60 * 1000) callMessageStates.delete(id);
+  }
+  for (const [id, tone] of callTones.entries()) {
+    if (currentTime - tone.at > 30 * 60 * 1000) callTones.delete(id);
   }
 }
 
