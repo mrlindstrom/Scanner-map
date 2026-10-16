@@ -101,6 +101,7 @@ Settings: `STORAGE_SAVE_*`, `STORAGE_FALLBACK_*`, `STORAGE_OUTAGE_COOLDOWN_SEC`.
   - plays `.m4a` files reliably
   - doesn't skip queued calls
   - logs errors instead of hiding them
+- **One Listen Live per server.** Discord only allows a bot one voice channel per server, so starting Listen Live on another talk group closes the previous channel and says so. The bot leaves about 2 minutes after the last listener does.
 - Keyword alerts now also fire for merged calls.
 
 ### 📜 Logs

@@ -5884,6 +5884,18 @@ async function handleListenLive(interaction, talkGroupID) {
   const guild = interaction.guild;
   const talkGroupInfo = await getTalkGroupName(talkGroupID);
 
+  // Discord allows a bot one voice connection per server: joining a second
+  // channel moves the existing connection. So only one talk group can be live
+  // per server; starting another closes the previous one.
+  let switchedFrom = null;
+  for (const [otherID, other] of activeVoiceChannels) {
+    if (otherID !== talkGroupID && other.voiceChannel && other.voiceChannel.guild.id === guild.id) {
+      switchedFrom = other.voiceChannel.name;
+      logger.info(`Listen Live: switching from talk group ${otherID} to ${talkGroupID} (one voice channel per server)`);
+      cleanupVoiceChannel(otherID);
+    }
+  }
+
   const voiceChannel = await getOrCreateVoiceChannel(guild, talkGroupID, talkGroupInfo.name);
   if (!voiceChannel) {
     await interaction.editReply('❌ Failed to create or find voice channel.');
@@ -5905,7 +5917,8 @@ async function handleListenLive(interaction, talkGroupID) {
   monitorVoiceChannel(talkGroupID);
   await interaction.editReply(
     `🎧 Please join the voice channel: ${voiceChannel}\nTalk Group: ${talkGroupInfo.name}\n` +
-    'New calls on this talk group will play there as they come in.'
+    'New calls on this talk group will play there as they come in.' +
+    (switchedFrom ? `\nℹ️ Stopped ${switchedFrom}: Discord lets the bot be in only one voice channel per server.` : '')
   );
 }
 
@@ -6058,7 +6071,9 @@ function cleanupVoiceChannel(talkGroupID) {
       logger.error(`Error stopping player for talk group ${talkGroupID}:`, error.message);
     }
   }
-  if (connection && connection.state.status !== VoiceConnectionStatus.Destroyed) {
+  // Never tear down a connection another talk group is still using
+  const shared = [...activeVoiceChannels.values()].some((other) => other.connection === connection);
+  if (connection && !shared && connection.state.status !== VoiceConnectionStatus.Destroyed) {
     try { connection.destroy(); } catch (error) {
       logger.error(`Error destroying connection for talk group ${talkGroupID}:`, error.message);
     }
