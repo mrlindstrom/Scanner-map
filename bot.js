@@ -5769,7 +5769,7 @@ const commands = [
 // Discord client setup
 client.commands = new Collection();
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
   logger.info(`Logged in as ${client.user.tag}!`);
 
   const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
