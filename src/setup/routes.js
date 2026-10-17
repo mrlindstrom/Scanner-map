@@ -16,6 +16,8 @@ const pythonEnv = require('./pythonEnv');
 const geoHelpers = require('./geoHelpers');
 const maintenance = require('./maintenance');
 const transcriptCorrections = require('../transcription/corrections');
+const settingsSchema = require('../config/settingsSchema');
+const liveEnv = require('../config/liveEnv');
 
 // Proxy a request to the bot process's localhost-only internal API (where the
 // Discord client lives). The bot and webserver are separate processes.
@@ -69,11 +71,25 @@ const SECRET_KEYS = [
   'ICAD_API_KEY',
 ];
 
+// Every documented setting, plus anything else found in .env (e.g. the
+// TALK_GROUP_<id> town hints), so all of them can be edited in Settings.
+for (const s of settingsSchema.SETTINGS) {
+  const list = s.type === 'secret' ? SECRET_KEYS : NON_SECRET_KEYS;
+  if (!list.includes(s.key)) list.push(s.key);
+}
+
 function safeStatus() {
   const values = envFile.readValues();
-  const out = { config: {}, secretsSet: {} };
+  const out = { config: {}, secretsSet: {}, otherKeys: [] };
   for (const k of NON_SECRET_KEYS) out.config[k] = values[k] ?? '';
   for (const k of SECRET_KEYS) out.secretsSet[k] = !!(values[k] && values[k].trim());
+  for (const k of Object.keys(values)) {
+    if (NON_SECRET_KEYS.includes(k) || SECRET_KEYS.includes(k) || settingsSchema.INTERNAL_KEYS.has(k)) continue;
+    out.config[k] = values[k];
+    out.otherKeys.push(k);
+  }
+  // Keys set in the real environment win over .env, so editing them here does nothing
+  out.overridden = liveEnv.overriddenKeys();
   out.setupComplete = envFile.isSetupComplete();
   // When launched via start.bat/start.sh we can self-restart into the full app
   // after setup, so the wizard can offer a one-click "Start Scanner Map".
@@ -544,20 +560,54 @@ function mountSetup(app, deps = {}) {
       });
   });
 
+  // Settings catalog for the "All Settings" tab
+  app.get('/api/setup/settings-schema', (req, res) => res.json({
+    sections: settingsSchema.SECTIONS,
+    settings: settingsSchema.SETTINGS,
+  }));
+
+  // Save settings. Only keys whose value actually changed are written; a value
+  // of null removes the key so its default applies. The reply says how each
+  // change takes effect: the running app picks the file up within a few seconds.
   app.post('/api/setup/save', (req, res) => {
     try {
-      const updates = req.body || {};
-      // Never let blank secret fields wipe existing stored secrets.
+      const body = req.body || {};
       const stored = envFile.readValues();
-      for (const k of SECRET_KEYS) {
-        if (updates[k] === '' || updates[k] == null) delete updates[k];
+      const updates = {};
+      for (const [k, raw] of Object.entries(body)) {
+        if (!/^[A-Z][A-Z0-9_]*$/.test(k) || settingsSchema.INTERNAL_KEYS.has(k)) continue;
+        const isSecret = SECRET_KEYS.includes(k);
+        // Never let blank secret fields wipe existing stored secrets (null still clears one)
+        if (isSecret && (raw === '' || raw === undefined)) continue;
+        if (raw === null) {
+          if (k in stored) updates[k] = null;
+          continue;
+        }
+        const value = String(raw);
+        if (/[\r\n]/.test(value)) return res.status(400).json({ ok: false, error: `${k} can't contain line breaks` });
+        // A blank value for a key that isn't in .env changes nothing
+        if (value === '' && !(k in stored)) continue;
+        if (stored[k] === value) continue;
+        updates[k] = value;
       }
       // Auto-generate a session secret if missing.
       if (!stored.SESSION_SECRET && !updates.SESSION_SECRET) {
         updates.SESSION_SECRET = envFile.generateSecret();
       }
-      envFile.writeValues(updates);
-      res.json({ ok: true });
+      const changed = Object.keys(updates);
+      if (changed.length) envFile.writeValues(updates);
+
+      const overridden = new Set(liveEnv.overriddenKeys());
+      const effect = { live: [], web: [], restart: [], overridden: [] };
+      for (const k of changed) {
+        const d = settingsSchema.describe(k);
+        if (overridden.has(k)) effect.overridden.push(k);
+        else if (d && d.apply === 'restart') effect.restart.push(k);
+        else if (d && d.web) effect.web.push(k);
+        else effect.live.push(k);
+      }
+      if (changed.length) log.info(`settings saved: ${changed.join(', ')}`);
+      res.json({ ok: true, changed, effect });
     } catch (e) {
       res.status(500).json({ ok: false, error: e.message });
     }
@@ -565,7 +615,16 @@ function mountSetup(app, deps = {}) {
 
   app.post('/api/setup/finish', (req, res) => {
     try {
-      if (req.body && Object.keys(req.body).length) envFile.writeValues(req.body);
+      if (req.body && Object.keys(req.body).length) {
+        // Blank fields for keys .env doesn't have would only replace their defaults
+        const stored = envFile.readValues();
+        const updates = {};
+        for (const [k, v] of Object.entries(req.body)) {
+          if (v == null || (v === '' && !(k in stored))) continue;
+          updates[k] = v;
+        }
+        envFile.writeValues(updates);
+      }
       // Make sure an API key exists so we can show it to the user.
       let apiKey = null;
       try { apiKey = apiKeys.ensureDefault(); } catch { /* ignore */ }

@@ -10,23 +10,29 @@ const moment = require('moment-timezone');
 const fs = require('fs');
 const path = require('path');
 
-// Environment variables - strict loading from .env only
-const {
-  LOCATIONIQ_API_KEY = null,
-  GOOGLE_MAPS_API_KEY = null, // Added for Google API support
-  GEOCODING_STATE,
-  GEOCODING_COUNTRY,
-  GEOCODING_TARGET_COUNTIES,
-  GEOCODING_CITY, // Still used as a fallback town name in LLM prompt
-  TIMEZONE,
-  // --- NEW: AI Provider Env Vars ---
-  AI_PROVIDER,
-  OPENAI_API_KEY,
-  OPENAI_MODEL,
-  OLLAMA_URL,
-  OLLAMA_MODEL,
-  TARGET_CITIES_LIST // Kept for potential future use or reference
-} = process.env;
+// Environment variables - strict loading from .env only. Re-read when .env
+// changes (see reloadSettings at the end of this file).
+let LOCATIONIQ_API_KEY, GOOGLE_MAPS_API_KEY, GEOCODING_STATE, GEOCODING_COUNTRY, GEOCODING_TARGET_COUNTIES,
+  GEOCODING_CITY, TIMEZONE, AI_PROVIDER, OPENAI_API_KEY, OPENAI_MODEL, OLLAMA_URL, OLLAMA_MODEL, TARGET_CITIES_LIST;
+function readGeocodingEnv() {
+  ({
+    LOCATIONIQ_API_KEY = null,
+    GOOGLE_MAPS_API_KEY = null, // Added for Google API support
+    GEOCODING_STATE,
+    GEOCODING_COUNTRY,
+    GEOCODING_TARGET_COUNTIES,
+    GEOCODING_CITY, // Still used as a fallback town name in LLM prompt
+    TIMEZONE,
+    // --- NEW: AI Provider Env Vars ---
+    AI_PROVIDER,
+    OPENAI_API_KEY,
+    OPENAI_MODEL,
+    OLLAMA_URL,
+    OLLAMA_MODEL,
+    TARGET_CITIES_LIST // Kept for potential future use or reference
+  } = process.env);
+}
+readGeocodingEnv();
 
 // --- VALIDATE AI-RELATED ENV VARS ---
 if (!AI_PROVIDER) {
@@ -52,8 +58,8 @@ if (AI_PROVIDER.toLowerCase() === 'openai') {
 
 // Validate required environment variables
 // Check if we have at least one geocoding API key
-const hasGoogleMaps = !!GOOGLE_MAPS_API_KEY;
-const hasLocationIQ = !!LOCATIONIQ_API_KEY;
+let hasGoogleMaps = !!GOOGLE_MAPS_API_KEY;
+let hasLocationIQ = !!LOCATIONIQ_API_KEY;
 
 if (!hasGoogleMaps && !hasLocationIQ) {
   console.error('ERROR: At least one geocoding API key is required (GOOGLE_MAPS_API_KEY or LOCATIONIQ_API_KEY)');
@@ -63,17 +69,20 @@ if (!hasGoogleMaps && !hasLocationIQ) {
 // Determine which provider to use and validate required variables
 let geocodingProvider = null;
 
-if (hasGoogleMaps && hasLocationIQ) {
-  // Both available - prefer LocationIQ for consistency with existing setup
-  geocodingProvider = 'locationiq';
-  console.log('[Geocoding] Both Google Maps and LocationIQ available, using LocationIQ');
-} else if (hasLocationIQ) {
-  geocodingProvider = 'locationiq';
-  console.log('[Geocoding] Using LocationIQ for geocoding');
-} else if (hasGoogleMaps) {
-  geocodingProvider = 'google';
-  console.log('[Geocoding] Using Google Maps for geocoding');
+function chooseGeocodingProvider() {
+  if (hasGoogleMaps && hasLocationIQ) {
+    // Both available - prefer LocationIQ for consistency with existing setup
+    geocodingProvider = 'locationiq';
+    console.log('[Geocoding] Both Google Maps and LocationIQ available, using LocationIQ');
+  } else if (hasLocationIQ) {
+    geocodingProvider = 'locationiq';
+    console.log('[Geocoding] Using LocationIQ for geocoding');
+  } else if (hasGoogleMaps) {
+    geocodingProvider = 'google';
+    console.log('[Geocoding] Using Google Maps for geocoding');
+  }
 }
+chooseGeocodingProvider();
 
 // Validate required environment variables based on provider
 const requiredVars = ['GEOCODING_STATE', 'GEOCODING_COUNTRY', 'GEOCODING_CITY', 'GEOCODING_TARGET_COUNTIES'];
@@ -91,8 +100,8 @@ if (!process.env.GEOCODING_CITY) process.env.GEOCODING_CITY = 'Baltimore';
 if (!process.env.GEOCODING_TARGET_COUNTIES) process.env.GEOCODING_TARGET_COUNTIES = 'Baltimore,Baltimore City,Anne Arundel,Howard,Carroll,Harford';
 
 // Parse target counties into array
-const TARGET_COUNTIES = process.env.GEOCODING_TARGET_COUNTIES.split(',').map(county => county.trim());
-const COUNTRY_CODES = process.env.GEOCODING_COUNTRY; // LocationIQ uses country codes
+let TARGET_COUNTIES = process.env.GEOCODING_TARGET_COUNTIES.split(',').map(county => county.trim());
+let COUNTRY_CODES = process.env.GEOCODING_COUNTRY; // LocationIQ uses country codes
 
 // Console shows only the extracted and geocoded addresses (plus warnings and
 // errors); the log files keep every step so extraction can be reviewed later.
@@ -126,17 +135,21 @@ const logger = winston.createLogger({
 
 // Build TALK_GROUPS from environment variables (remains the same)
 const TALK_GROUPS = {};
-Object.keys(process.env).forEach(key => {
-  if (key.startsWith('TALK_GROUP_')) {
-    const talkGroupId = key.replace('TALK_GROUP_', '');
-    TALK_GROUPS[talkGroupId] = process.env[key];
-  }
-});
+function readTalkGroupHints() {
+  Object.keys(TALK_GROUPS).forEach((id) => { delete TALK_GROUPS[id]; });
+  Object.keys(process.env).forEach(key => {
+    if (key.startsWith('TALK_GROUP_')) {
+      const talkGroupId = key.replace('TALK_GROUP_', '');
+      TALK_GROUPS[talkGroupId] = process.env[key];
+    }
+  });
+}
+readTalkGroupHints();
 logger.info(`Loaded ${Object.keys(TALK_GROUPS).length} talk groups from environment variables`);
 
 // Target cities that are allowed to plot. If non-empty, an address whose city
 // is NOT in this list is rejected (it won't appear on the map).
-const TARGET_CITIES = process.env.TARGET_CITIES_LIST
+let TARGET_CITIES = process.env.TARGET_CITIES_LIST
   ? process.env.TARGET_CITIES_LIST.split(',').map(city => city.trim()).filter(Boolean)
   : [];
 
@@ -156,8 +169,8 @@ function normalizePlace(name) {
     .trim();
 }
 
-const TARGET_COUNTY_SET = new Set(TARGET_COUNTIES.map(normalizeCounty).filter(Boolean));
-const TARGET_CITY_SET = new Set(TARGET_CITIES.map(normalizePlace).filter(Boolean));
+let TARGET_COUNTY_SET = new Set(TARGET_COUNTIES.map(normalizeCounty).filter(Boolean));
+let TARGET_CITY_SET = new Set(TARGET_CITIES.map(normalizePlace).filter(Boolean));
 
 function isTargetCounty(county) {
   if (!TARGET_COUNTY_SET.size) return true; // no counties configured -> allow
@@ -182,7 +195,9 @@ const TALK_GROUP_META = {};
  * (and merges with) any legacy TALK_GROUP_<id> environment variables.
  * @param {import('sqlite3').Database} [db]
  */
+let talkGroupDb = null; // kept so changed TALK_GROUP_<id> hints can be re-merged
 function loadTalkGroups(db) {
+  if (db) talkGroupDb = db;
   // Seed from legacy env vars first (so DB can override with richer data).
   Object.keys(TALK_GROUPS).forEach((id) => {
     TALK_GROUP_META[id] = { town: TALK_GROUPS[id], county: null };
@@ -1097,7 +1112,38 @@ async function processTranscriptAndLink(transcript, talkGroupId) {
 }
 
 
+// Apply settings changed in .env while running (called by bot.js)
+function reloadSettings(changedKeys = []) {
+  readGeocodingEnv();
+  hasGoogleMaps = !!GOOGLE_MAPS_API_KEY;
+  hasLocationIQ = !!LOCATIONIQ_API_KEY;
+  const previousProvider = geocodingProvider;
+  if (changedKeys.some((k) => k === 'GOOGLE_MAPS_API_KEY' || k === 'LOCATIONIQ_API_KEY')) {
+    geocodingProvider = null;
+    chooseGeocodingProvider();
+    if (!geocodingProvider) {
+      logger.error('[Geocoding] No geocoding API key is set; keeping the previous provider');
+      geocodingProvider = previousProvider;
+    }
+  }
+  TARGET_COUNTIES = String(GEOCODING_TARGET_COUNTIES || '').split(',').map((county) => county.trim()).filter(Boolean);
+  COUNTRY_CODES = GEOCODING_COUNTRY;
+  TARGET_CITIES = TARGET_CITIES_LIST ? TARGET_CITIES_LIST.split(',').map((city) => city.trim()).filter(Boolean) : [];
+  TARGET_COUNTY_SET = new Set(TARGET_COUNTIES.map(normalizeCounty).filter(Boolean));
+  TARGET_CITY_SET = new Set(TARGET_CITIES.map(normalizePlace).filter(Boolean));
+  if (changedKeys.some((k) => ['GEOCODING_TARGET_COUNTIES', 'GEOCODING_STATE', 'GEOCODING_COUNTRY', 'LOCATIONIQ_API_KEY'].includes(k))) {
+    targetViewbox = null; // search area is looked up again on the next geocode
+    targetViewboxPromise = null;
+  }
+  if (changedKeys.some((k) => k.startsWith('TALK_GROUP_'))) {
+    readTalkGroupHints();
+    Object.keys(TALK_GROUP_META).forEach((id) => { delete TALK_GROUP_META[id]; });
+    loadTalkGroups(talkGroupDb);
+  }
+}
+
 module.exports = {
+  reloadSettings,
   loadStreetGazetteer,
   extractAddress,
   geocodeAddress,

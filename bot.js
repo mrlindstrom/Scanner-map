@@ -4,67 +4,74 @@ require('dotenv').config();
 // Direct console.* output (startup checks, geocoding) uses the shared log layout
 require('./src/consoleFormat').patchConsole('bot');
 
-// Get environment variables first, before any usage
-const {
-  BOT_PORT: PORT,  
-  PUBLIC_DOMAIN,
-  DISCORD_TOKEN,
-  MAPPED_TALK_GROUPS: mappedTalkGroupsString,
-  ENABLE_MAPPED_TALK_GROUPS = 'true',
-  TIMEZONE,
-  API_KEY_FILE,
-  SUMMARY_LOOKBACK_HOURS,
-  TRANSCRIPTION_MODE,
-  FASTER_WHISPER_SERVER_URL,
-  WHISPER_MODEL,
-  STORAGE_MODE,
-  S3_ENDPOINT,
-  S3_BUCKET_NAME,
-  S3_ACCESS_KEY_ID,
-  S3_SECRET_ACCESS_KEY,
-  ASK_AI_LOOKBACK_HOURS,
-  MAX_CONCURRENT_TRANSCRIPTIONS,
-  // --- NEW: AI Provider Env Vars ---
-  AI_PROVIDER,
-  OPENAI_API_KEY,
-  OPENAI_MODEL,
-  OLLAMA_URL,
-  OLLAMA_MODEL,
-  TRANSCRIPTION_DEVICE,
-  // --- NEW: Python Command Override ---
-  PYTHON_COMMAND,
-  // --- NEW: Auto-update Control ---
-  AUTO_UPDATE_PYTHON_PACKAGES = 'true',
-  // --- NEW: ICAD Transcription Env Vars ---
-  ICAD_URL,
-  ICAD_PROFILE,
-  ICAD_API_KEY,
-  // --- NEW: OpenAI Transcription Prompting ---
-  OPENAI_TRANSCRIPTION_PROMPT,
-  OPENAI_TRANSCRIPTION_MODEL,
-  OPENAI_TRANSCRIPTION_TEMPERATURE,
-  // --- Webserver Env Vars ---
-  WEBSERVER_PORT = '3001',
-  WEBSERVER_PASSWORD,
-  ENABLE_AUTH = 'false',
-  SESSION_DURATION_DAYS = '7',
-  MAX_SESSIONS_PER_USER = '5',
-  GOOGLE_MAPS_API_KEY = null,
-  LOCATIONIQ_API_KEY = null,
-  // --- Map-only mode (run without Discord) ---
-  MAP_ONLY_MODE = 'false',
-  // --- AI summary scoping ---
-  ENABLE_SUMMARY_TALK_GROUPS = 'false',
-  SUMMARY_TALK_GROUPS: summaryTalkGroupsString,
-  // --- Transcription filtering (whitelist/blacklist for what gets transcribed) ---
-  TRANSCRIBE_MODE = 'all', // 'all' | 'whitelist' | 'blacklist'
-  TRANSCRIBE_TALK_GROUPS: transcribeTalkGroupsString,
-  // --- NEW: Two-Tone Detection Env Vars ---
-  ENABLE_TWO_TONE_MODE = 'false',
-  TWO_TONE_TALK_GROUPS: twoToneTalkGroupsString,
-  TWO_TONE_QUEUE_SIZE
-  // Tone tuning vars (TONE_*, TWO_TONE_*, PULSED_*, LONG_TONE_*) are read by tone_detect.py
-} = process.env;
+// Settings from .env. They're re-read when the file changes (see
+// applyLiveSettings), so most changes saved in Settings apply without a restart.
+const liveEnv = require('./src/config/liveEnv');
+liveEnv.init();
+let PORT, PUBLIC_DOMAIN, DISCORD_TOKEN, mappedTalkGroupsString, ENABLE_MAPPED_TALK_GROUPS, TIMEZONE, API_KEY_FILE, SUMMARY_LOOKBACK_HOURS, TRANSCRIPTION_MODE, FASTER_WHISPER_SERVER_URL, WHISPER_MODEL, STORAGE_MODE, S3_ENDPOINT, S3_BUCKET_NAME, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, ASK_AI_LOOKBACK_HOURS, MAX_CONCURRENT_TRANSCRIPTIONS, AI_PROVIDER, OPENAI_API_KEY, OPENAI_MODEL, OLLAMA_URL, OLLAMA_MODEL, TRANSCRIPTION_DEVICE, PYTHON_COMMAND, AUTO_UPDATE_PYTHON_PACKAGES, ICAD_URL, ICAD_PROFILE, ICAD_API_KEY, OPENAI_TRANSCRIPTION_PROMPT, OPENAI_TRANSCRIPTION_MODEL, OPENAI_TRANSCRIPTION_TEMPERATURE, WEBSERVER_PORT, WEBSERVER_PASSWORD, ENABLE_AUTH, SESSION_DURATION_DAYS, MAX_SESSIONS_PER_USER, GOOGLE_MAPS_API_KEY, LOCATIONIQ_API_KEY, MAP_ONLY_MODE, ENABLE_SUMMARY_TALK_GROUPS, summaryTalkGroupsString, TRANSCRIBE_MODE, transcribeTalkGroupsString, ENABLE_TWO_TONE_MODE, twoToneTalkGroupsString, TWO_TONE_QUEUE_SIZE;
+function readEnvSettings() {
+  ({
+    BOT_PORT: PORT,  
+    PUBLIC_DOMAIN,
+    DISCORD_TOKEN,
+    MAPPED_TALK_GROUPS: mappedTalkGroupsString,
+    ENABLE_MAPPED_TALK_GROUPS = 'true',
+    TIMEZONE,
+    API_KEY_FILE,
+    SUMMARY_LOOKBACK_HOURS,
+    TRANSCRIPTION_MODE,
+    FASTER_WHISPER_SERVER_URL,
+    WHISPER_MODEL,
+    STORAGE_MODE,
+    S3_ENDPOINT,
+    S3_BUCKET_NAME,
+    S3_ACCESS_KEY_ID,
+    S3_SECRET_ACCESS_KEY,
+    ASK_AI_LOOKBACK_HOURS,
+    MAX_CONCURRENT_TRANSCRIPTIONS,
+    // --- NEW: AI Provider Env Vars ---
+    AI_PROVIDER,
+    OPENAI_API_KEY,
+    OPENAI_MODEL,
+    OLLAMA_URL,
+    OLLAMA_MODEL,
+    TRANSCRIPTION_DEVICE,
+    // --- NEW: Python Command Override ---
+    PYTHON_COMMAND,
+    // --- NEW: Auto-update Control ---
+    AUTO_UPDATE_PYTHON_PACKAGES = 'true',
+    // --- NEW: ICAD Transcription Env Vars ---
+    ICAD_URL,
+    ICAD_PROFILE,
+    ICAD_API_KEY,
+    // --- NEW: OpenAI Transcription Prompting ---
+    OPENAI_TRANSCRIPTION_PROMPT,
+    OPENAI_TRANSCRIPTION_MODEL,
+    OPENAI_TRANSCRIPTION_TEMPERATURE,
+    // --- Webserver Env Vars ---
+    WEBSERVER_PORT = '3001',
+    WEBSERVER_PASSWORD,
+    ENABLE_AUTH = 'false',
+    SESSION_DURATION_DAYS = '7',
+    MAX_SESSIONS_PER_USER = '5',
+    GOOGLE_MAPS_API_KEY = null,
+    LOCATIONIQ_API_KEY = null,
+    // --- Map-only mode (run without Discord) ---
+    MAP_ONLY_MODE = 'false',
+    // --- AI summary scoping ---
+    ENABLE_SUMMARY_TALK_GROUPS = 'false',
+    SUMMARY_TALK_GROUPS: summaryTalkGroupsString,
+    // --- Transcription filtering (whitelist/blacklist for what gets transcribed) ---
+    TRANSCRIBE_MODE = 'all', // 'all' | 'whitelist' | 'blacklist'
+    TRANSCRIBE_TALK_GROUPS: transcribeTalkGroupsString,
+    // --- NEW: Two-Tone Detection Env Vars ---
+    ENABLE_TWO_TONE_MODE = 'false',
+    TWO_TONE_TALK_GROUPS: twoToneTalkGroupsString,
+    TWO_TONE_QUEUE_SIZE
+    // Tone tuning vars (TONE_*, TWO_TONE_*, PULSED_*, LONG_TONE_*) are read by tone_detect.py
+  } = process.env);
+}
+readEnvSettings();
 
 // --- VALIDATE AI-RELATED ENV VARS ---
 if (!AI_PROVIDER) {
@@ -89,7 +96,7 @@ if (AI_PROVIDER.toLowerCase() === 'openai') {
 // --- END VALIDATION ---
 
 // --- VALIDATE TRANSCRIPTION-RELATED ENV VARS ---
-const effectiveTranscriptionMode = TRANSCRIPTION_MODE || 'local'; // Keep this to ensure a default
+let effectiveTranscriptionMode = TRANSCRIPTION_MODE || 'local'; // Keep this to ensure a default
 if (!['local', 'remote', 'openai', 'icad'].includes(effectiveTranscriptionMode)) {
   console.error(`FATAL: Invalid TRANSCRIPTION_MODE specified in .env file: '${TRANSCRIPTION_MODE}'. Must be 'local', 'remote', 'openai', or 'icad'.`);
   process.exit(1);
@@ -126,13 +133,13 @@ const callEmbeds = require('./src/discord/callEmbeds');
 const summaryTriage = require('./src/summary/triage');
 const streetMatching = require('./src/geocoding/streets');
 // Skip the AI for calls that can't contain a location (no number, street or place word)
-const ADDRESS_PREFILTER_ENABLED = String(process.env.ADDRESS_PREFILTER ?? 'true').toLowerCase() !== 'false';
+let ADDRESS_PREFILTER_ENABLED = String(process.env.ADDRESS_PREFILTER ?? 'true').toLowerCase() !== 'false';
 const summaryIncidents = require('./src/summary/incidents');
 const audioPreprocess = require('./src/transcription/audioPreprocess');
 const hallucinationFilter = require('./src/transcription/hallucinationFilter');
 const transcriptCorrections = require('./src/transcription/corrections');
 const segmentAlign = require('./src/transcription/segmentAlign');
-const SEGMENT_ALIGN_CONFIG = segmentAlign.loadConfig();
+let SEGMENT_ALIGN_CONFIG = segmentAlign.loadConfig();
 const { v4: uuidv4 } = require('uuid');
 const busboy = require('busboy');
 const sqlite3 = require('sqlite3').verbose();
@@ -141,7 +148,7 @@ const { Readable } = require('stream');
 const fetch = require('node-fetch');
 const winston = require('winston');
 const { getFileTransports } = require('./src/logger');
-const { consoleFormat, VERBOSE: CONSOLE_SHOW_ALL_INFO } = require('./src/consoleFormat');
+const { consoleFormat, isVerbose: consoleShowsAllInfo } = require('./src/consoleFormat');
 const moment = require('moment-timezone');
 const TALK_GROUPS = {};
 const readline = require('readline');
@@ -155,33 +162,57 @@ const SUMMARY_INTERVAL = 10 * 60 * 1000; // Changed from 5 to 10 minutes in mill
 let lastSummaryUpdate = 0;
 let summaryMessage = null;
 
-// Parse lookback hours from environment with fallback to 1 hour
-const parsedLookbackHours = parseFloat(SUMMARY_LOOKBACK_HOURS);
-const LOOKBACK_HOURS = isNaN(parsedLookbackHours) ? 1 : parsedLookbackHours;
-const LOOKBACK_PERIOD = LOOKBACK_HOURS * 60 * 60 * 1000; // Convert hours to milliseconds
-
-// Parse the string into an array
-const MAPPED_TALK_GROUPS = mappedTalkGroupsString
-  ? mappedTalkGroupsString.split(',').map(id => id.trim())
-  : [];
-const IS_MAPPED_TALK_GROUPS_ENABLED = ENABLE_MAPPED_TALK_GROUPS.toLowerCase() === 'true';
+// Values derived from the settings above; recomputed by computeDerivedSettings()
+// whenever .env changes.
+let LOOKBACK_HOURS, LOOKBACK_PERIOD;
+let MAPPED_TALK_GROUPS, IS_MAPPED_TALK_GROUPS_ENABLED;
+let IS_SUMMARY_TALK_GROUPS_ENABLED, SUMMARY_TALK_GROUPS;
+let TRANSCRIBE_MODE_VALUE, TRANSCRIBE_TALK_GROUPS;
+let IS_TWO_TONE_MODE_ENABLED, TWO_TONE_TALK_GROUPS, TWO_TONE_QUEUE_SIZE_VALUE;
+let MAX_CONCURRENT_TRANSCRIPTIONS_VALUE;
+// Map-only mode decides at startup whether Discord is used, so it needs a restart
 const IS_MAP_ONLY_MODE = String(MAP_ONLY_MODE).toLowerCase() === 'true';
 
-// AI summary scoping: optionally restrict the dispatch-summary channel to a set
-// of talkgroups. Entries may be plain ids or "system:id" pairs.
-const IS_SUMMARY_TALK_GROUPS_ENABLED = String(ENABLE_SUMMARY_TALK_GROUPS).toLowerCase() === 'true';
-const SUMMARY_TALK_GROUPS = summaryTalkGroupsString
-  ? summaryTalkGroupsString.split(',').map((id) => id.trim()).filter(Boolean)
-  : [];
+function computeDerivedSettings() {
+  effectiveTranscriptionMode = TRANSCRIPTION_MODE || 'local';
 
-// Transcription filtering: TrunkRecorder sends every call (it can't pre-filter
-// like SDRTrunk), so allow a whitelist/blacklist of talkgroups to transcribe.
-const TRANSCRIBE_MODE_VALUE = ['all', 'whitelist', 'blacklist'].includes(String(TRANSCRIBE_MODE).toLowerCase())
-  ? String(TRANSCRIBE_MODE).toLowerCase()
-  : 'all';
-const TRANSCRIBE_TALK_GROUPS = transcribeTalkGroupsString
-  ? transcribeTalkGroupsString.split(',').map((id) => id.trim()).filter(Boolean)
-  : [];
+  // Summary lookback in hours, falling back to 1 hour
+  const parsedLookbackHours = parseFloat(SUMMARY_LOOKBACK_HOURS);
+  LOOKBACK_HOURS = isNaN(parsedLookbackHours) ? 1 : parsedLookbackHours;
+  LOOKBACK_PERIOD = LOOKBACK_HOURS * 60 * 60 * 1000; // Convert hours to milliseconds
+
+  MAPPED_TALK_GROUPS = mappedTalkGroupsString
+    ? mappedTalkGroupsString.split(',').map(id => id.trim())
+    : [];
+  IS_MAPPED_TALK_GROUPS_ENABLED = String(ENABLE_MAPPED_TALK_GROUPS).toLowerCase() === 'true';
+
+  // AI summary scoping: optionally restrict the dispatch-summary channel to a set
+  // of talkgroups. Entries may be plain ids or "system:id" pairs.
+  IS_SUMMARY_TALK_GROUPS_ENABLED = String(ENABLE_SUMMARY_TALK_GROUPS).toLowerCase() === 'true';
+  SUMMARY_TALK_GROUPS = summaryTalkGroupsString
+    ? summaryTalkGroupsString.split(',').map((id) => id.trim()).filter(Boolean)
+    : [];
+
+  // Transcription filtering: TrunkRecorder sends every call (it can't pre-filter
+  // like SDRTrunk), so allow a whitelist/blacklist of talkgroups to transcribe.
+  TRANSCRIBE_MODE_VALUE = ['all', 'whitelist', 'blacklist'].includes(String(TRANSCRIBE_MODE).toLowerCase())
+    ? String(TRANSCRIBE_MODE).toLowerCase()
+    : 'all';
+  TRANSCRIBE_TALK_GROUPS = transcribeTalkGroupsString
+    ? transcribeTalkGroupsString.split(',').map((id) => id.trim()).filter(Boolean)
+    : [];
+
+  IS_TWO_TONE_MODE_ENABLED = String(ENABLE_TWO_TONE_MODE).toLowerCase() === 'true';
+  TWO_TONE_TALK_GROUPS = twoToneTalkGroupsString
+    ? twoToneTalkGroupsString.split(',').map(id => id.trim())
+    : [];
+  TWO_TONE_QUEUE_SIZE_VALUE = parseInt(TWO_TONE_QUEUE_SIZE, 10) || 1;
+
+  // MAX_CONCURRENT_TRANSCRIPTIONS from env, or the default
+  const parsedMaxConcurrent = parseInt(MAX_CONCURRENT_TRANSCRIPTIONS, 10);
+  MAX_CONCURRENT_TRANSCRIPTIONS_VALUE = !isNaN(parsedMaxConcurrent) && parsedMaxConcurrent > 0 ? parsedMaxConcurrent : 3;
+}
+computeDerivedSettings();
 
 // Decide whether a given call should be transcribed at all.
 function shouldTranscribe(talkGroupID, systemName) {
@@ -193,14 +224,8 @@ function shouldTranscribe(talkGroupID, systemName) {
   return TRANSCRIBE_MODE_VALUE === 'whitelist' ? inList : !inList;
 }
 
-// Parse Two-Tone configuration
-const IS_TWO_TONE_MODE_ENABLED = ENABLE_TWO_TONE_MODE.toLowerCase() === 'true';
-const TWO_TONE_TALK_GROUPS = twoToneTalkGroupsString
-  ? twoToneTalkGroupsString.split(',').map(id => id.trim())
-  : [];
-const TWO_TONE_QUEUE_SIZE_VALUE = parseInt(TWO_TONE_QUEUE_SIZE, 10) || 1;
 // Validate required two-tone environment variables if two-tone mode is enabled
-if (ENABLE_TWO_TONE_MODE && ENABLE_TWO_TONE_MODE.toLowerCase() === 'true') {
+if (IS_TWO_TONE_MODE_ENABLED) {
   const requiredTwoToneVars = [
     'ENABLE_TWO_TONE_MODE', 'TWO_TONE_TALK_GROUPS', 'TWO_TONE_QUEUE_SIZE',
     'TONE_DETECTION_TYPE', 'TWO_TONE_MIN_TONE_LENGTH', 'TWO_TONE_MAX_TONE_LENGTH',
@@ -217,10 +242,6 @@ if (ENABLE_TWO_TONE_MODE && ENABLE_TWO_TONE_MODE.toLowerCase() === 'true') {
     process.exit(1);
   }
 }
-
-// Parse MAX_CONCURRENT_TRANSCRIPTIONS from env or use default
-const parsedMaxConcurrent = parseInt(MAX_CONCURRENT_TRANSCRIPTIONS, 10);
-const MAX_CONCURRENT_TRANSCRIPTIONS_VALUE = !isNaN(parsedMaxConcurrent) && parsedMaxConcurrent > 0 ? parsedMaxConcurrent : 3;
 
 // High-volume system optimizations
 const MAX_QUEUE_SIZE = 50; // Limit queue size to prevent memory issues
@@ -705,7 +726,7 @@ const logger = winston.createLogger({
       level: 'info',
       format: consoleFormat({
         source: 'bot',
-        filter: (info) => info.level !== 'info' || CONSOLE_SHOW_ALL_INFO ||
+        filter: (info) => info.level !== 'info' || consoleShowsAllInfo() ||
           allowedPatterns.some((pattern) => pattern.test(info.message)),
       }),
     })
@@ -714,19 +735,25 @@ const logger = winston.createLogger({
 
 // --- Storage backend (local | s3 | r2 | b2 | minio | db) ---
 let storage = null;
-const STORAGE_USES_DB = isDbMode(process.env);
-try {
-  storage = createStorage(process.env); // null only when STORAGE_MODE=db
-  logger.info(`[Bot] Storage mode: ${STORAGE_MODE || 'local'}${storage ? ` (${storage.type})` : ' (sqlite blob)'}`);
-} catch (e) {
-  logger.error(`[Bot] Storage init failed: ${e.message}. Falling back to local.`);
-  storage = createStorage({ STORAGE_MODE: 'local' });
+let STORAGE_USES_DB, STORAGE_IS_LOCAL, STORAGE_DEFERS_TEMP_CLEANUP;
+// (Re)create the storage backend from the current settings. Calls already
+// saved keep the backend recorded on their row.
+function initStorage() {
+  STORAGE_USES_DB = isDbMode(process.env);
+  try {
+    storage = createStorage(process.env); // null only when STORAGE_MODE=db
+    logger.info(`[Bot] Storage mode: ${STORAGE_MODE || 'local'}${storage ? ` (${storage.type})` : ' (sqlite blob)'}`);
+  } catch (e) {
+    logger.error(`[Bot] Storage init failed: ${e.message}. Falling back to local.`);
+    storage = createStorage({ STORAGE_MODE: 'local' });
+  }
+  // True when audio lives on local disk (temp file becomes the permanent file).
+  STORAGE_IS_LOCAL = !!storage && storage.type === 'local';
+  // When NOT local (remote object storage OR sqlite blob), keep the temp file
+  // until transcription finishes and use the in-memory buffer for local Whisper.
+  STORAGE_DEFERS_TEMP_CLEANUP = !STORAGE_IS_LOCAL;
 }
-// True when audio lives on local disk (temp file becomes the permanent file).
-const STORAGE_IS_LOCAL = !!storage && storage.type === 'local';
-// When NOT local (remote object storage OR sqlite blob), keep the temp file
-// until transcription finishes and use the in-memory buffer for local Whisper.
-const STORAGE_DEFERS_TEMP_CLEANUP = !STORAGE_IS_LOCAL;
+initStorage();
 // --- END Storage Setup ---
 
 // --- INITIALIZATION FUNCTIONS ---
@@ -929,6 +956,19 @@ function initializeDatabase() {
   });
 }
 
+// Set the admin user's sign-in password to WEBSERVER_PASSWORD (after it changed
+// in Settings), creating the user if needed.
+function updateAdminPassword() {
+  if (ENABLE_AUTH?.toLowerCase() !== 'true' || !WEBSERVER_PASSWORD) return;
+  const salt = crypto.randomBytes(16).toString('hex');
+  const passwordHash = crypto.pbkdf2Sync(WEBSERVER_PASSWORD, salt, 10000, 64, 'sha512').toString('hex');
+  db.run('UPDATE users SET password_hash = ?, salt = ? WHERE username = ?', [passwordHash, salt, 'admin'], function (err) {
+    if (err) return logger.error(`Could not update the admin password: ${err.message}`);
+    if (this.changes) logger.info('Admin password updated from Settings.', { console: true });
+    else createAdminUser().catch((e) => logger.error(`Could not create the admin user: ${e.message}`));
+  });
+}
+
 // Function to create admin user if authentication is enabled
 function createAdminUser() {
   return new Promise((resolve, reject) => {
@@ -982,14 +1022,16 @@ function createAdminUser() {
 }
 
 // Function to start webserver as child process
+let webserverChild = null;
 function startWebserver() {
   return new Promise((resolve, reject) => {
     logger.info('Starting webserver...');
     
-    const webserverProcess = spawn('node', ['webserver.js'], {
+    const webserverProcess = spawn(process.execPath, [path.join(__dirname, 'webserver.js')], {
       stdio: 'inherit',
-      env: { ...process.env }
+      env: { ...process.env, SCANNER_ENV_OVERRIDDEN: liveEnv.overriddenKeys().join(',') }
     });
+    webserverChild = webserverProcess;
 
     webserverProcess.on('error', (err) => {
       logger.error('Failed to start webserver:', err);
@@ -1002,6 +1044,21 @@ function startWebserver() {
       resolve(webserverProcess);
     }, 2000);
   });
+}
+
+// Restart the web server so it picks up changed settings (it reads them once
+// at startup). Browsers reconnect on their own.
+async function restartWebserver() {
+  const old = webserverChild;
+  if (!old) return;
+  webserverChild = null;
+  logger.info('Restarting the web server to apply changed settings...', { console: true });
+  await new Promise((resolve) => {
+    const done = setTimeout(resolve, 5000);
+    old.once('exit', () => { clearTimeout(done); resolve(); });
+    try { old.kill(); } catch (_) { clearTimeout(done); resolve(); }
+  });
+  await startWebserver();
 }
 
 // Main initialization function
@@ -1104,7 +1161,8 @@ const prism = require('prism-media');
 const { MessageFlags } = require('discord.js');
 
 // Import the geocoding module
-const { extractAddress, geocodeAddress, hyperlinkAddress, loadTalkGroups } = require('./geocoding');
+const geocodingModule = require('./geocoding');
+const { extractAddress, geocodeAddress, hyperlinkAddress, loadTalkGroups } = geocodingModule;
 
 // Express app setup
 const app = express();
@@ -2129,6 +2187,10 @@ async function startTranscriptionProcess() {
     return;
   }
 
+  // A process stopped on purpose (settings change, timeout, health check) has
+  // already been replaced; its exit must not tear down the new one.
+  const thisTranscriptionProcess = transcriptionProcess;
+
   // Set up process error handling first
   transcriptionProcess.on('error', (err) => {
     logger.error(`Failed to start local transcription process: ${err.message}`);
@@ -2303,6 +2365,10 @@ async function startTranscriptionProcess() {
 
   // Handle process exit with cleanup and better diagnostics
   transcriptionProcess.on('close', (code, signal) => {
+    if (transcriptionProcess !== thisTranscriptionProcess) {
+      logger.info(`Previous transcription process exited (${signal || code})`);
+      return;
+    }
     logger.error(`Local transcription process exited with code ${code}, signal: ${signal}`);
     
     // More specific error handling based on exit conditions
@@ -2408,6 +2474,33 @@ function cleanupTranscriptionProcess() {
   }
 }
 
+// Restart the local transcriber with changed settings (model, device,
+// decoding options). It waits for the call in progress; calls arriving
+// meanwhile wait in the queue and go to the new process.
+let transcriberRestartPending = false;
+function restartTranscriberWhenIdle() {
+  transcriberRestartPending = true;
+  maybeRestartTranscriber();
+}
+
+function maybeRestartTranscriber() {
+  if (!transcriberRestartPending || isProcessingTranscription) return;
+  transcriberRestartPending = false;
+  if (effectiveTranscriptionMode !== 'local') {
+    if (transcriptionProcess) {
+      logger.info(`Transcription mode is now '${effectiveTranscriptionMode}'; stopping the local transcriber`, { console: true });
+      cleanupTranscriptionProcess();
+    }
+    return;
+  }
+  const waiting = transcriptionQueue;
+  transcriptionQueue = []; // keep queued calls from being failed by the cleanup
+  if (transcriptionProcess) cleanupTranscriptionProcess();
+  transcriptionQueue = waiting.concat(transcriptionQueue);
+  logger.info('Restarting the local transcriber with the new settings...', { console: true });
+  startTranscriptionProcess();
+}
+
 // Helper function to reset processing state
 function resetProcessingState() {
   isProcessingTranscription = false;
@@ -2486,7 +2579,15 @@ function processNextTranscription() {
       return;
   }
 
-  if (isProcessingTranscription || transcriptionQueue.length === 0) {
+  if (isProcessingTranscription) {
+    return;
+  }
+  // Settings changed: restart the transcriber now that it's idle
+  if (transcriberRestartPending) {
+    maybeRestartTranscriber();
+    return;
+  }
+  if (transcriptionQueue.length === 0) {
     return;
   }
 
@@ -2853,8 +2954,8 @@ async function transcribeWithICADAPI(filePath, callback) {
 
 // --- Transcription quality pipeline (adapted from RadioTranscriber) ---
 // Configured via AUDIO_PREPROCESS_* and TRANSCRIPT_FILTER_* in .env.
-const AUDIO_PREPROCESS_CONFIG = audioPreprocess.loadConfig();
-const TRANSCRIPT_FILTER_CONFIG = hallucinationFilter.loadConfig();
+let AUDIO_PREPROCESS_CONFIG = audioPreprocess.loadConfig();
+let TRANSCRIPT_FILTER_CONFIG = hallucinationFilter.loadConfig();
 
 // Send a file to the API-based transcription modes (local mode queues its own payload).
 function transcribeByMode(audioPath, callback) {
@@ -3513,8 +3614,11 @@ function updateTranscription(id, transcriptionText, callback) {
 }
 
 // Retention window for audio (days). 0 = keep forever.
-const AUDIO_RETENTION_DAYS = parseInt(process.env.AUDIO_RETENTION_DAYS, 10);
-const RETENTION_DAYS = Number.isFinite(AUDIO_RETENTION_DAYS) ? AUDIO_RETENTION_DAYS : 30;
+const retentionDaysSetting = () => {
+  const days = parseInt(process.env.AUDIO_RETENTION_DAYS, 10);
+  return Number.isFinite(days) ? days : 30;
+};
+let RETENTION_DAYS = retentionDaysSetting();
 
 // Function to cleanup old audio files (DB blobs AND objects in the storage backend)
 // Remove merged-call segment files a crash or restart left behind (normally
@@ -3609,7 +3713,7 @@ cleanupStaleSegmentFiles(); // also clear leftovers from before this start
 // Calls whose upload failed were saved under STORAGE_FALLBACK_DIR with
 // storage_mode='pending'. This job uploads them, marks them as stored, and
 // deletes the local copies (or just deletes them if the call is gone).
-const PENDING_UPLOAD_INTERVAL_MS = Math.max(1, parseInt(process.env.STORAGE_RETRY_INTERVAL_MIN, 10) || 5) * 60 * 1000;
+const pendingUploadIntervalMs = () => Math.max(1, parseInt(process.env.STORAGE_RETRY_INTERVAL_MIN, 10) || 5) * 60 * 1000;
 
 async function runPendingUploadJob() {
   if (!storage || STORAGE_IS_LOCAL) return;
@@ -3635,7 +3739,11 @@ async function runPendingUploadJob() {
   }
 }
 
-setInterval(runPendingUploadJob, PENDING_UPLOAD_INTERVAL_MS);
+let pendingUploadTimer = setInterval(runPendingUploadJob, pendingUploadIntervalMs());
+function reschedulePendingUploads() {
+  clearInterval(pendingUploadTimer);
+  pendingUploadTimer = setInterval(runPendingUploadJob, pendingUploadIntervalMs());
+}
 setTimeout(runPendingUploadJob, 60 * 1000); // first pass shortly after startup
 
 // Function to transcribe audio
@@ -3905,12 +4013,13 @@ function getAudioDuration(audioFilePath, callback) {
 
 // Merged-call speaker segments shorter than this are dropped (key-ups, kerchunks)
 // Split multi-speaker (merged) calls per speaker; false = transcribe the whole recording at once
-const MERGED_CALL_SPLIT = String(process.env.MERGED_CALL_SPLIT || 'true').toLowerCase() !== 'false';
+let MERGED_CALL_SPLIT = String(process.env.MERGED_CALL_SPLIT || 'true').toLowerCase() !== 'false';
 
-const MERGED_CALL_MIN_SEGMENT_SEC = (() => {
+const mergedCallMinSegmentSec = () => {
   const v = parseFloat(process.env.MERGED_CALL_MIN_SEGMENT_SEC);
   return Number.isFinite(v) && v >= 0 ? v : 0.5;
-})();
+};
+let MERGED_CALL_MIN_SEGMENT_SEC = mergedCallMinSegmentSec();
 
 // Function to split audio file into segments using ffmpeg
 function splitAudioFile(audioFilePath, segments, callback) {
@@ -4883,12 +4992,17 @@ function getMessageUrlForTranscription(transcriptionId, suppressWarnings = false
 // Dispatch summary in two passes: score every call cheaply (src/summary/triage.js),
 // then have the LLM group and rate the top candidates as incidents
 // (src/summary/incidents.js). Routine traffic never reaches the summary.
-const SUMMARY_MAX_INCIDENTS = Math.max(1, parseInt(process.env.SUMMARY_MAX_INCIDENTS, 10) || 6);
-const SUMMARY_MAX_CANDIDATES = Math.max(5, parseInt(process.env.SUMMARY_MAX_CANDIDATES, 10) || 40);
-const SUMMARY_MIN_SCORE = Number.isFinite(parseFloat(process.env.SUMMARY_MIN_SCORE)) ? parseFloat(process.env.SUMMARY_MIN_SCORE) : 2.5;
-const SUMMARY_AI_TIMEOUT_MS = (parseFloat(process.env.SUMMARY_AI_TIMEOUT_SEC) || 180) * 1000;
-const SUMMARY_EXTRA_PRIORITY = summaryTriage.compileExtra(process.env.SUMMARY_EXTRA_PRIORITY_TERMS);
-const SUMMARY_EXTRA_BENIGN = summaryTriage.compileExtra(process.env.SUMMARY_EXTRA_BENIGN_TERMS);
+let SUMMARY_MAX_INCIDENTS, SUMMARY_MAX_CANDIDATES, SUMMARY_MIN_SCORE, SUMMARY_AI_TIMEOUT_MS;
+let SUMMARY_EXTRA_PRIORITY, SUMMARY_EXTRA_BENIGN;
+function loadSummarySettings() {
+  SUMMARY_MAX_INCIDENTS = Math.max(1, parseInt(process.env.SUMMARY_MAX_INCIDENTS, 10) || 6);
+  SUMMARY_MAX_CANDIDATES = Math.max(5, parseInt(process.env.SUMMARY_MAX_CANDIDATES, 10) || 40);
+  SUMMARY_MIN_SCORE = Number.isFinite(parseFloat(process.env.SUMMARY_MIN_SCORE)) ? parseFloat(process.env.SUMMARY_MIN_SCORE) : 2.5;
+  SUMMARY_AI_TIMEOUT_MS = (parseFloat(process.env.SUMMARY_AI_TIMEOUT_SEC) || 180) * 1000;
+  SUMMARY_EXTRA_PRIORITY = summaryTriage.compileExtra(process.env.SUMMARY_EXTRA_PRIORITY_TERMS);
+  SUMMARY_EXTRA_BENIGN = summaryTriage.compileExtra(process.env.SUMMARY_EXTRA_BENIGN_TERMS);
+}
+loadSummarySettings();
 
 function summaryTimeLabel(ts) {
   return new Date(ts * 1000).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: TIMEZONE });
@@ -6475,6 +6589,62 @@ async function startBotServices() {
     throw error;
   }
 }
+
+// --- Settings changed in .env while running --------------------------------
+// liveEnv re-reads .env every few seconds (and right after Settings saves it).
+// Values are re-derived here; things that hold a connection or a process are
+// restarted only when their own settings changed.
+const settingsSchema = require('./src/config/settingsSchema');
+const TRANSCRIBER_KEYS = new Set([
+  'TRANSCRIPTION_MODE', 'TRANSCRIPTION_DEVICE', 'WHISPER_MODEL', 'PYTHON_COMMAND',
+  'OPENAI_TRANSCRIPTION_PROMPT', 'AUTO_UPDATE_PYTHON_PACKAGES',
+]);
+const STORAGE_KEYS = new Set(['STORAGE_MODE', 'LOCAL_AUDIO_DIR', 'S3_ENDPOINT', 'S3_REGION', 'S3_BUCKET_NAME',
+  'S3_ACCESS_KEY_ID', 'S3_SECRET_ACCESS_KEY', 'S3_FORCE_PATH_STYLE', 'S3_PUBLIC_BASE_URL']);
+
+function applyLiveSettings(changed) {
+  const names = changed.map((k) => {
+    if (process.env[k] === undefined) return `${k} removed`;
+    return settingsSchema.isSecret(k) ? `${k} (secret)` : `${k}=${process.env[k]}`;
+  });
+  logger.info(`Settings changed: ${names.join(', ')}`, { console: true });
+
+  readEnvSettings();
+  computeDerivedSettings();
+  ADDRESS_PREFILTER_ENABLED = String(process.env.ADDRESS_PREFILTER ?? 'true').toLowerCase() !== 'false';
+  SEGMENT_ALIGN_CONFIG = segmentAlign.loadConfig();
+  AUDIO_PREPROCESS_CONFIG = audioPreprocess.loadConfig();
+  TRANSCRIPT_FILTER_CONFIG = hallucinationFilter.loadConfig();
+  RETENTION_DAYS = retentionDaysSetting();
+  MERGED_CALL_SPLIT = String(process.env.MERGED_CALL_SPLIT || 'true').toLowerCase() !== 'false';
+  MERGED_CALL_MIN_SEGMENT_SEC = mergedCallMinSegmentSec();
+  loadSummarySettings();
+  pendingUploads.reloadConfig();
+  geocodingModule.reloadSettings(changed);
+  const has = (test) => changed.some(test);
+
+  if (has((k) => k === 'LOG_LEVEL')) require('./src/logger').applyLevel();
+  if (has((k) => k === 'WEBSERVER_PASSWORD')) updateAdminPassword();
+  else if (has((k) => k === 'ENABLE_AUTH')) createAdminUser().catch((e) => logger.error(`Could not create the admin user: ${e.message}`));
+  if (has((k) => k === 'STORAGE_RETRY_INTERVAL_MIN')) reschedulePendingUploads();
+  if (has((k) => STORAGE_KEYS.has(k))) initStorage();
+  if (has((k) => TRANSCRIBER_KEYS.has(k) || k.startsWith('WHISPER_'))) restartTranscriberWhenIdle();
+  if (has((k) => k === 'DISCORD_TOKEN') && !IS_MAP_ONLY_MODE) {
+    discordClientReady = false;
+    Promise.resolve(client.destroy())
+      .then(() => client.login(DISCORD_TOKEN))
+      .then(() => { discordClientReady = true; logger.info('Discord bot signed in with the new token.', { console: true }); })
+      .catch((e) => logger.error(`Discord sign-in with the new token failed: ${e.message}`));
+  }
+  if (has((k) => settingsSchema.WEB_KEYS.has(k))) {
+    restartWebserver().catch((e) => logger.error(`Web server restart failed: ${e.message}`));
+  }
+  const needRestart = changed.filter((k) => settingsSchema.describe(k)?.apply === 'restart');
+  if (needRestart.length) logger.warn(`Restart Scanner Map to apply: ${needRestart.join(', ')}`);
+}
+
+liveEnv.onChange((changed) => applyLiveSettings(changed));
+liveEnv.watch();
 
 // In map-only mode we still ingest calls, transcribe, geocode and serve the
 // web map - we just skip everything that requires a Discord connection.

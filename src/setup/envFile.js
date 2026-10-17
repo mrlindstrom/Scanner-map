@@ -75,16 +75,22 @@ function formatValue(v) {
 
 /**
  * Merge updates into the existing .env, preserving comments/ordering.
- * New keys are appended under a "Setup Wizard" section.
- * @param {Record<string,string>} updates
+ * New keys are appended under a "Setup Wizard" section; a null value removes
+ * the key's line (so the built-in default applies again).
+ * @param {Record<string,string|null>} updates
  */
 function writeValues(updates) {
   const raw = readRaw();
   const { lines, index } = parseEnv(raw);
   const appended = [];
+  const removed = new Set();
 
   for (const [key, value] of Object.entries(updates)) {
     if (value === undefined) continue;
+    if (value === null) {
+      if (key in index) removed.add(index[key]);
+      continue;
+    }
     const formatted = `${key}=${formatValue(value)}`;
     if (key in index) {
       lines[index[key]] = formatted;
@@ -93,7 +99,7 @@ function writeValues(updates) {
     }
   }
 
-  let output = lines.join('\n');
+  let output = lines.filter((_, i) => !removed.has(i)).join('\n');
   if (appended.length) {
     output += `\n\n# ----- Added by Setup Wizard (${new Date().toISOString()}) -----\n`;
     output += appended.join('\n') + '\n';

@@ -19,9 +19,9 @@
 const winston = require('winston');
 const MESSAGE = Symbol.for('message'); // winston's final-output key (triple-beam)
 
-const VERBOSE = String(process.env.LOG_CONSOLE_VERBOSE || '').toLowerCase() === 'true';
+// Read on every line so changes saved in Settings apply without a restart
+const isVerbose = () => String(process.env.LOG_CONSOLE_VERBOSE || '').toLowerCase() === 'true';
 const USE_COLOR = !process.env.NO_COLOR && (process.stdout.isTTY || process.env.FORCE_COLOR);
-const TIMEZONE = process.env.TIMEZONE || undefined;
 const SOURCE_WIDTH = 9;
 const REPEAT_WINDOW_MS = 60 * 1000;
 
@@ -39,9 +39,25 @@ const LEVELS = {
   debug: { label: 'DEBUG', color: C.gray },
 };
 
-const timeFormatter = new Intl.DateTimeFormat('en-US', {
-  timeZone: TIMEZONE, hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
-});
+let timeFormatterZone = null;
+let timeFormatterCache = null;
+function timeFormatter() {
+  const zone = process.env.TIMEZONE || undefined;
+  if (!timeFormatterCache || zone !== timeFormatterZone) {
+    timeFormatterZone = zone;
+    try {
+      timeFormatterCache = new Intl.DateTimeFormat('en-US', {
+        timeZone: zone, hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+      });
+    } catch (_) {
+      // Invalid zone name: fall back to the machine's
+      timeFormatterCache = new Intl.DateTimeFormat('en-US', {
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+      });
+    }
+  }
+  return timeFormatterCache;
+}
 
 /**
  * Split a message into colored spans. Returns [[text, color], ...].
@@ -165,14 +181,14 @@ function formatConsoleLine({ level, source, message, stack, timestamp, skipRepea
   }
 
   const lvl = LEVELS[level] || LEVELS.info;
-  const time = timeFormatter.format(timestamp ? new Date(timestamp) : new Date());
+  const time = timeFormatter().format(timestamp ? new Date(timestamp) : new Date());
   const prefix =
     `${paint(C.gray, time)}  ${paint(lvl.color, lvl.label.padEnd(5))}  ` +
     `${paint(C.dim, String(source || '').slice(0, SOURCE_WIDTH).padEnd(SOURCE_WIDTH))} `;
   const prefixWidth = 8 + 2 + 5 + 2 + SOURCE_WIDTH + 1;
 
   let body = text.trim();
-  if (VERBOSE && stack && !body.includes(stack)) body += `\n${stack}`;
+  if (isVerbose() && stack && !body.includes(stack)) body += `\n${stack}`;
 
   const spans = highlight(body, level);
 
@@ -190,7 +206,7 @@ function formatConsoleLine({ level, source, message, stack, timestamp, skipRepea
  */
 function consoleFormat({ source = '', filter } = {}) {
   return winston.format((info) => {
-    if (info.level === 'debug' && !VERBOSE) return false;
+    if (info.level === 'debug' && !isVerbose()) return false;
     if (filter && info.console !== true && !filter(info)) return false;
     const line = formatConsoleLine({
       level: info.level,
@@ -213,13 +229,13 @@ function consoleFormat({ source = '', filter } = {}) {
 function patchConsole(source, filter) {
   const write = (level) => (...args) => {
     const message = args
-      .map((a) => (a instanceof Error ? (VERBOSE ? a.stack : a.message) : typeof a === 'string' ? a : JSON.stringify(a)))
+      .map((a) => (a instanceof Error ? (isVerbose() ? a.stack : a.message) : typeof a === 'string' ? a : JSON.stringify(a)))
       .join(' ');
     // A leading "[Webserver]" / "[Audio DB]" style tag becomes the source column
     const tag = message.match(/^\[([^\]]{1,24})\]:?\s*/);
     const lineSource = tag ? tag[1].toLowerCase().replace(/\s+/g, '-') : source;
     const text = tag ? message.slice(tag[0].length) : message;
-    if (filter && !VERBOSE && !filter(level, text, lineSource)) return;
+    if (filter && !isVerbose() && !filter(level, text, lineSource)) return;
     const line = formatConsoleLine({ level, source: lineSource, message: text });
     if (line !== null) process[level === 'error' || level === 'warn' ? 'stderr' : 'stdout'].write(line + '\n');
   };
@@ -229,4 +245,4 @@ function patchConsole(source, filter) {
   console.error = write('error');
 }
 
-module.exports = { consoleFormat, formatConsoleLine, patchConsole, VERBOSE };
+module.exports = { consoleFormat, formatConsoleLine, patchConsole, isVerbose };

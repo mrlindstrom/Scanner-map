@@ -47,7 +47,12 @@ function loadConfig(env = process.env) {
   };
 }
 
-const config = loadConfig();
+let config = loadConfig();
+
+/** Re-read the STORAGE_* settings (after .env changes). */
+function reloadConfig() {
+  config = loadConfig();
+}
 let remoteDownUntil = 0; // set after a save exhausts its retries
 let sizeCache = { at: 0, bytes: 0 }; // fallback folder size, refreshed every 30s
 
@@ -212,6 +217,7 @@ async function flushPending(storage, { getRow, markUploaded, batchSize = 200 } =
 }
 
 module.exports = {
+  reloadConfig,
   PENDING_MODE,
   loadConfig,
   config,

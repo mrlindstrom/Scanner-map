@@ -222,3 +222,23 @@ hr.sep { border: none; border-top: 1px solid var(--border); margin: 22px 0; }
 .apikey-desc { color: var(--muted); font-size: 13px; line-height: 1.5; margin-bottom: 12px; }
 .apikey-row { display: flex; gap: 8px; }
 .apikey-row input { font-family: ui-monospace, Menlo, Consolas, monospace; }
+
+/* All Settings tab */
+.setting-section { border: 1px solid var(--border); border-radius: 9px; margin-bottom: 10px; background: var(--panel); }
+.setting-section > summary { cursor: pointer; padding: 10px 14px; font-weight: 600; list-style-position: inside; }
+.setting-section > summary .sel-count { color: var(--muted); font-weight: normal; font-size: 13px; margin-left: 6px; }
+.setting-row { padding: 10px 14px; border-top: 1px solid var(--line, var(--border)); }
+.setting-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 6px; }
+.setting-label { font-weight: 600; font-size: 14px; }
+.setting-key { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.setting-input { display: flex; gap: 8px; align-items: center; }
+.setting-input input, .setting-input select { flex: 1; min-width: 0; }
+.setting-input .btn { flex: none; }
+.setting-row .hint { color: var(--muted); font-size: 13px; margin-top: 5px; line-height: 1.4; }
+.badge.web { color: var(--warn); border-color: var(--warn); }
+.badge.restart { color: var(--danger); border-color: var(--danger); }
+input.invalid { border-color: var(--danger) !important; }
+@media (max-width: 600px) {
+  .setting-input { flex-wrap: wrap; }
+  .setting-input input, .setting-input select { flex-basis: 100%; }
+}

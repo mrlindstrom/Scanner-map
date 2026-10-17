@@ -1594,11 +1594,189 @@
     },
   };
 
+  // ---- All Settings: every .env key, grouped, from /api/setup/settings-schema
+  let settingsSchemaCache = null;
+  const allSettingsStep = {
+    title: 'All Settings',
+    render(c) {
+      c.appendChild(el('h1', {}, 'All Settings'));
+      c.appendChild(el('p', { class: 'lead' }, 'Every setting in <code>.env</code>. Change values, then press <b>Save Changes</b>. Most apply within a few seconds without a restart.'));
+      c.appendChild(infoBox(
+        '<span class="badge set">instant</span> applies within a few seconds. ' +
+        '<span class="badge web">web restart</span> also restarts the web server for a few seconds; open pages reconnect on their own. ' +
+        '<span class="badge restart">restart</span> takes effect the next time Scanner Map starts. ' +
+        'A blank field uses the default shown in grey; <b>↺</b> removes the line from <code>.env</code> so the default applies.'));
+
+      const bar = el('div', { class: 'tg-bulk' });
+      const search = el('input', { type: 'text', placeholder: 'Search settings…', style: 'max-width:260px' });
+      search.value = allSettingsStep.query || '';
+      const changedOnly = el('label', { class: 'switch', style: 'margin:0;font-weight:normal' });
+      const changedCb = el('input', { type: 'checkbox' });
+      changedOnly.appendChild(changedCb);
+      changedOnly.appendChild(document.createTextNode('Only values set in .env'));
+      const count = el('span', { class: 'sel-count' }, '');
+      [search, changedOnly, count].forEach((n) => bar.appendChild(n));
+      c.appendChild(bar);
+      const body = el('div', {}, 'Loading…');
+      c.appendChild(body);
+
+      const overridden = new Set(get('__overridden') || []);
+      const otherKeys = get('__otherKeys') || [];
+      const openSections = allSettingsStep.open || (allSettingsStep.open = new Set());
+
+      const goToTab = (title) => {
+        const idx = steps.findIndex((s) => s.title === title);
+        if (idx >= 0) { current = idx; renderStep(); }
+      };
+
+      function inputFor(s) {
+        const key = s.key;
+        const cur = state[key] == null ? '' : String(state[key]);
+        let input;
+        if (s.type === 'bool') {
+          input = el('select');
+          [['', `default (${s.def || 'false'})`], ['true', 'true'], ['false', 'false']].forEach(([v, t]) => {
+            const o = el('option', { value: v }, t);
+            if (cur.toLowerCase() === v) o.selected = true;
+            input.appendChild(o);
+          });
+        } else if (s.type === 'select') {
+          input = el('select');
+          const opts = [''].concat(s.options || []);
+          if (cur && !opts.includes(cur)) opts.push(cur);
+          opts.forEach((v) => {
+            const o = el('option', { value: v }, v || `default (${s.def})`);
+            if (cur === v) o.selected = true;
+            input.appendChild(o);
+          });
+        } else {
+          input = el('input', {
+            type: s.type === 'secret' ? 'password' : 'text',
+            inputmode: s.type === 'number' ? 'decimal' : 'text',
+            placeholder: s.type === 'secret'
+              ? (state['__secretSet_' + key] ? '•••••••• saved; leave blank to keep' : 'not set')
+              : (s.def ? `default: ${s.def}` : ''),
+            autocomplete: 'off',
+          });
+          if (s.type !== 'secret') input.value = cur;
+        }
+        input.addEventListener(input.tagName === 'SELECT' ? 'change' : 'input', () => {
+          if (s.type === 'number' && input.value.trim() && !Number.isFinite(Number(input.value))) {
+            input.classList.add('invalid');
+          } else {
+            input.classList.remove('invalid');
+          }
+          // Blank = remove the line so the default applies (secrets: blank keeps the saved one)
+          set(key, input.value === '' && s.type !== 'secret' ? null : input.value);
+        });
+        return input;
+      }
+
+      function row(s) {
+        const r = el('div', { class: 'setting-row' });
+        const head = el('div', { class: 'setting-head' });
+        head.appendChild(el('span', { class: 'setting-label' }, escapeHtml(s.label)));
+        head.appendChild(el('code', { class: 'setting-key' }, s.key));
+        const badge = s.apply === 'restart' ? ['restart', 'restart']
+          : (s.web ? ['web', 'web restart'] : ['set', 'instant']);
+        head.appendChild(el('span', { class: `badge ${badge[0]}` }, badge[1]));
+        if (overridden.has(s.key)) {
+          head.appendChild(el('span', { class: 'badge restart', title: 'Set in the system environment, which wins over .env' }, 'set outside .env'));
+        }
+        r.appendChild(head);
+        const line = el('div', { class: 'setting-input' });
+        line.appendChild(inputFor(s));
+        const reset = el('button', { class: 'btn btn-sm', type: 'button', title: 'Remove from .env (use the default)' }, '↺');
+        reset.addEventListener('click', () => { set(s.key, null); if (s.type === 'secret') state['__secretSet_' + s.key] = false; renderList(); });
+        line.appendChild(reset);
+        if (s.guided && steps.some((t) => t.title === s.guided)) {
+          const link = el('button', { class: 'btn btn-sm', type: 'button', title: 'Open the guided setup for this' }, `${escapeHtml(s.guided)} →`);
+          link.addEventListener('click', () => goToTab(s.guided));
+          line.appendChild(link);
+        }
+        r.appendChild(line);
+        if (s.help) r.appendChild(el('div', { class: 'hint' }, escapeHtml(s.help)));
+        return r;
+      }
+
+      function renderList() {
+        const schema = settingsSchemaCache;
+        const q = search.value.trim().toLowerCase();
+        const setOnly = changedCb.checked;
+        body.innerHTML = '';
+        // Keys found in .env that aren't in the catalog (e.g. TALK_GROUP_<id> hints)
+        const extra = otherKeys.filter((k) => !schema.settings.some((s) => s.key === k)).map((k) => ({
+          key: k, section: k.startsWith('TALK_GROUP_') ? 'talkgroups' : 'other',
+          label: k.startsWith('TALK_GROUP_') ? `Town hint for talkgroup ${k.slice(11)}` : k,
+          type: 'text', def: '', apply: 'live', web: false,
+          help: k.startsWith('TALK_GROUP_') ? 'Town/county the address AI assumes for this talkgroup.' : 'Not used by Scanner Map as far as it knows.',
+        }));
+        const all = schema.settings.concat(extra);
+        let shown = 0;
+        schema.sections.forEach(([id, title]) => {
+          const items = all.filter((s) => s.section === id).filter((s) => {
+            if (setOnly && (state[s.key] == null || state[s.key] === '') && !state['__secretSet_' + s.key]) return false;
+            if (!q) return true;
+            return [s.key, s.label, s.help].some((v) => String(v || '').toLowerCase().includes(q));
+          });
+          if (!items.length) return;
+          shown += items.length;
+          const det = el('details', { class: 'setting-section' });
+          if (q || setOnly || openSections.has(id)) det.open = true;
+          // Remember sections opened by hand, not ones a search opened
+          det.addEventListener('toggle', () => {
+            if (q || setOnly) return;
+            if (det.open) openSections.add(id); else openSections.delete(id);
+          });
+          det.appendChild(el('summary', {}, `${escapeHtml(title)} <span class="sel-count">${items.length}</span>`));
+          items.forEach((s) => det.appendChild(row(s)));
+          if (id === 'talkgroups' && !q) det.appendChild(addTownHint());
+          body.appendChild(det);
+        });
+        count.textContent = `${shown} setting(s)`;
+        if (!shown) body.appendChild(el('p', { class: 'hint' }, 'No settings match.'));
+      }
+
+      // TALK_GROUP_<id>=Town lines can be added here as well
+      function addTownHint() {
+        const r = el('div', { class: 'setting-row' });
+        r.appendChild(el('div', { class: 'setting-head' }, '<span class="setting-label">Add a town hint</span>'));
+        const line = el('div', { class: 'setting-input' });
+        const id = el('input', { type: 'text', placeholder: 'Talkgroup ID', style: 'max-width:140px' });
+        const town = el('input', { type: 'text', placeholder: 'Town / county' });
+        const btn = el('button', { class: 'btn btn-sm', type: 'button' }, 'Add');
+        btn.addEventListener('click', () => {
+          const tg = id.value.trim();
+          if (!/^\d+$/.test(tg) || !town.value.trim()) { toast('Enter a numeric talkgroup ID and a town', 'err'); return; }
+          const key = `TALK_GROUP_${tg}`;
+          set(key, town.value.trim());
+          if (!otherKeys.includes(key)) otherKeys.push(key);
+          state.__otherKeys = otherKeys;
+          renderList();
+        });
+        [id, town, btn].forEach((n) => line.appendChild(n));
+        r.appendChild(line);
+        r.appendChild(el('div', { class: 'hint' }, 'Saved as TALK_GROUP_&lt;id&gt; when you press Save Changes.'));
+        return r;
+      }
+
+      search.addEventListener('input', () => { allSettingsStep.query = search.value; renderList(); });
+      changedCb.addEventListener('change', renderList);
+      const ready = settingsSchemaCache
+        ? Promise.resolve()
+        : adminFetch('/api/setup/settings-schema').then((r) => {
+          if (!r.ok || !r.data) throw new Error((r.data && r.data.error) || `HTTP ${r.status}`);
+          settingsSchemaCache = r.data;
+        });
+      ready.then(renderList).catch((e) => { body.textContent = `Could not load the settings list: ${e.message}`; });
+    },
+  };
+
   // In settings mode: drop "Review & Finish", append the live admin tabs.
   if (SETTINGS_MODE) {
     if (steps[steps.length - 1].title === 'Review & Finish') steps.pop();
     steps.push(
-      apiKeysStep, discordStep, plotStep, correctionsStep, purgeStep,
+      allSettingsStep, apiKeysStep, discordStep, plotStep, correctionsStep, purgeStep,
       usersStep, sessionsStep, maintenanceStep, updatesStep, healthStep,
     );
   }
@@ -1768,7 +1946,9 @@
     c.scrollTop = 0;
   }
 
+  let lastSaveResult = null; // { changed, effect } from the last save
   async function saveProgress() {
+    lastSaveResult = null;
     const payload = {};
     Object.keys(state).forEach((k) => { if (!k.startsWith('__')) payload[k] = state[k]; });
     if (configLoadError) {
@@ -1780,6 +1960,7 @@
     try {
       const r = await adminFetch('/api/setup/save', { method: 'POST', body: JSON.stringify(payload) });
       if (!r.ok) throw new Error((r.data && r.data.error) || `HTTP ${r.status}`);
+      lastSaveResult = r.data;
       $('#save-indicator').textContent = 'Saved';
       setTimeout(() => ($('#save-indicator').textContent = ''), 1500);
       return true;
@@ -1883,7 +2064,7 @@
   $('#btn-next').addEventListener('click', async () => {
     const saved = await saveProgress();
     if (SETTINGS_MODE) {
-      if (saved) toast('Settings saved. Some changes need a restart.', 'ok');
+      if (saved) await afterSettingsSaved(lastSaveResult);
       else toast('Settings were NOT saved: ' + $('#save-indicator').textContent, 'err');
       return;
     }
@@ -1892,6 +2073,60 @@
     renderStep();
   });
   $('#btn-back').addEventListener('click', () => { if (current > 0) { current -= 1; renderStep(); } });
+
+  // Tell the admin how the saved changes take effect, wait out a web server
+  // restart, then reload the values from .env.
+  async function afterSettingsSaved(result) {
+    const effect = (result && result.effect) || { live: [], web: [], restart: [], overridden: [] };
+    const changed = (result && result.changed) || [];
+    if (!changed.length) { toast('Nothing changed', 'ok'); return; }
+    const parts = [];
+    const instant = effect.live.length + effect.web.length;
+    if (instant) parts.push(`${instant} setting(s) apply within a few seconds`);
+    if (effect.restart.length) parts.push(`restart Scanner Map to apply ${effect.restart.join(', ')}`);
+    if (effect.overridden.length) parts.push(`${effect.overridden.join(', ')} ignored: set outside .env`);
+    const ind = $('#save-indicator');
+    if (effect.web.length) {
+      const newPort = changed.includes('WEBSERVER_PORT') ? String(get('WEBSERVER_PORT') || '').trim() : '';
+      if (newPort && newPort !== location.port && !(newPort === '80' && !location.port)) {
+        const url = `${location.protocol}//${location.hostname}${newPort === '80' ? '' : ':' + newPort}/settings`;
+        toast(`Saved. The web server is moving to port ${newPort}.`, 'ok');
+        ind.innerHTML = `Web server moved: <a href="${escapeHtml(url)}">${escapeHtml(url)}</a>`;
+        return;
+      }
+      ind.textContent = 'Saved; web server restarting…';
+      toast(parts.join('; '), 'ok');
+      // The bot notices the change within ~2s, then the server is down for a few seconds
+      await new Promise((r) => setTimeout(r, 3000));
+      for (let i = 0; i < 40; i++) {
+        try {
+          const h = await fetch('/api/health', { cache: 'no-store' });
+          if (h.ok) break;
+        } catch (_) { /* still restarting */ }
+        await new Promise((r) => setTimeout(r, 750));
+      }
+      ind.textContent = 'Saved; web server back';
+      setTimeout(() => (ind.textContent = ''), 2500);
+    } else {
+      toast(parts.join('; '), effect.restart.length || effect.overridden.length ? '' : 'ok');
+    }
+    await reloadStatus();
+    renderStep();
+  }
+
+  async function reloadStatus() {
+    try {
+      const r = await adminFetch('/api/setup/status');
+      if (!r.ok || !r.data) return;
+      Object.keys(state).forEach((k) => { if (!k.startsWith('__') && state[k] === null) delete state[k]; });
+      Object.assign(state, r.data.config || {});
+      Object.entries(r.data.secretsSet || {}).forEach(([k, v]) => { state['__secretSet_' + k] = v; });
+      state['__otherKeys'] = r.data.otherKeys || [];
+      state['__overridden'] = r.data.overridden || [];
+      // Typed secrets are saved now; clear them so they aren't sent again
+      Object.keys(r.data.secretsSet || {}).forEach((k) => { delete state[k]; });
+    } catch (_) { /* keep what we have */ }
+  }
 
   // Grab an admin session token if one exists (needed when auth is enabled),
   // then load existing config and start.
@@ -1907,6 +2142,8 @@
         Object.assign(state, status.config || {});
         Object.entries(status.secretsSet || {}).forEach(([k, v]) => { state['__secretSet_' + k] = v; });
         state['__launcher'] = !!status.launcher;
+        state['__otherKeys'] = status.otherKeys || [];
+        state['__overridden'] = status.overridden || [];
       } else if (SETTINGS_MODE) {
         // Don't fall back to defaults silently: they'd show e.g. auth as "disabled"
         configLoadError = (r.data && r.data.error) || `HTTP ${r.status}`;

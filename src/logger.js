@@ -66,6 +66,11 @@ const baseLogger = winston.createLogger({
   ],
 });
 
+/** Apply a changed LOG_LEVEL (settings saved while running). */
+function applyLevel() {
+  baseLogger.level = process.env.LOG_LEVEL || 'info';
+}
+
 /**
  * Returns a child-style logger tagged with a module name.
  * @param {string} moduleName
@@ -79,4 +84,4 @@ function createLogger(moduleName) {
   };
 }
 
-module.exports = { baseLogger, createLogger, getFileTransports, LOG_DIR };
+module.exports = { baseLogger, createLogger, getFileTransports, applyLevel, LOG_DIR };
