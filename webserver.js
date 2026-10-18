@@ -18,6 +18,7 @@ const http = require('http');
 const socketIo = require('socket.io');
 const crypto = require('crypto');
 const fetch = require('node-fetch');
+const llmQueue = require('./src/ai/llmQueue');
 const fs = require('fs');
 
 // --- Modernized shared modules ---
@@ -396,11 +397,9 @@ Category:`;
 
     let category = 'OTHER'; // Default value
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => {
-        console.warn(`[Webserver] AI request timed out after 10 seconds during categorization.`);
-        controller.abort();
-    }, 10000); // 10-second timeout
+    // Through the shared AI queue, behind address extraction. While the AI isn't
+    // answering, skip rather than wait: new map calls are sent after this.
+    const queueOpts = { label: 'Categorization', timeoutMs: 10000, priority: 'low', queueWhenDown: false, maxWaitMs: 30000 };
 
     // --- AI Provider Logic ---
     if (AI_PROVIDER.toLowerCase() === 'openai') {
@@ -410,7 +409,7 @@ Category:`;
         }
         console.log(`[Webserver] Categorizing with OpenAI model: ${OPENAI_MODEL}`);
 
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        const response = await llmQueue.request('https://api.openai.com/v1/chat/completions', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -422,10 +421,7 @@ Category:`;
                 temperature: 0.2, // Lower temp for more deterministic category
                 max_tokens: 20    // A category name is short
             }),
-            signal: controller.signal
-        });
-
-        clearTimeout(timeoutId);
+        }, queueOpts);
 
         if (!response.ok) {
           const errorText = await response.text();
@@ -441,7 +437,7 @@ Category:`;
     } else { // Default to Ollama
         console.log(`[Webserver] Categorizing with Ollama model: ${OLLAMA_MODEL}`);
 
-        const response = await fetch(`${OLLAMA_URL}/api/generate`, {
+        const response = await llmQueue.request(`${OLLAMA_URL}/api/generate`, {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({
@@ -453,10 +449,7 @@ Category:`;
 				num_ctx: 8192
             }
           }),
-          signal: controller.signal
-        });
-
-        clearTimeout(timeoutId);
+        }, queueOpts);
 
         if (!response.ok) {
           console.error(`[Webserver] Ollama API error! status: ${response.status} for transcript: ${transcript}`);
@@ -485,6 +478,10 @@ Category:`;
     return category;
 
   } catch (error) {
+    if (error.name === 'LlmUnavailableError') {
+      console.warn(`[Webserver] ${error.message}`);
+      return 'OTHER';
+    }
     console.error(`[Webserver] Error categorizing call: "${transcript}". Error: ${error.message}`);
     if (error.name === 'AbortError') {
          console.error(`[Webserver] AI request timed out during categorization: ${error.message}`);

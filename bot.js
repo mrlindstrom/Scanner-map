@@ -128,6 +128,7 @@ const bcrypt = require('bcryptjs');
 const { createStorage, isDbMode, buildKey } = require('./src/storage');
 const pendingUploads = require('./src/storage/pendingUploads');
 const { runMigrations } = require('./src/db/migrations');
+const llmQueue = require('./src/ai/llmQueue');
 const { audioUrl: buildAudioUrl, getPublicBaseUrl } = require('./src/utils/publicUrl');
 const callEmbeds = require('./src/discord/callEmbeds');
 const summaryTriage = require('./src/summary/triage');
@@ -732,6 +733,7 @@ const logger = winston.createLogger({
     })
   ]
 });
+llmQueue.setLogger({ warn: (m) => logger.warn(m), info: (m) => logger.info(m, { console: true }) });
 
 // --- Storage backend (local | s3 | r2 | b2 | minio | db) ---
 let storage = null;
@@ -4190,8 +4192,9 @@ async function processMergedCallSegments(
     logger.info(`Updated DB transcription for merged call ID ${transcriptionId}`);
     
     // Same address/tone handling as single-speaker calls, on the combined text and full recording
+    let lateLocation = null;
     try {
-      await analyzeCall(transcriptionId, fullTranscription, talkGroupID, talkGroupName, systemName, storagePath);
+      lateLocation = await analyzeCall(transcriptionId, fullTranscription, talkGroupID, talkGroupName, systemName, storagePath);
     } catch (error) {
       logger.error(`Error analyzing merged call ID ${transcriptionId}: ${error.message}`, { stack: error.stack });
     }
@@ -4215,6 +4218,7 @@ async function processMergedCallSegments(
     });
     const mergedMessageUrl = await postCallMessage(entry, talkGroupID, talkGroupName, systemName);
     scheduleCategoryRefresh(entry);
+    if (lateLocation) lateLocation.then(() => addLateLocation(entry)).catch(() => {});
 
     // Keyword alerts on the combined text
     try {
@@ -4247,6 +4251,8 @@ async function processMergedCallSegments(
 // Post-transcription analysis shared by normal and merged (per-speaker) calls:
 // two-tone follow-up queueing, address extraction/geocoding and tone detection.
 // audioFilePath is the storage key / path of the full call recording.
+// Resolves with a promise for an address lookup still waiting on the AI (see
+// addLateLocation), or null.
 async function analyzeCall(id, transcriptionText, talkGroupID, talkGroupName, systemName, audioFilePath) {
   // Auto-queue calls after two-tone detection (if in two-tone mode)
   if (IS_TWO_TONE_MODE_ENABLED && lastTwoToneTime > 0 && lastDetectedToneGroup) {
@@ -4277,8 +4283,16 @@ async function analyzeCall(id, transcriptionText, talkGroupID, talkGroupName, sy
 
   // Handle address extraction based on mode
   const locationPossible = !ADDRESS_PREFILTER_ENABLED || streetMatching.mightContainLocation(transcriptionText);
+  let lateLocation = null;
   if (transcriptionText.length >= 15 && locationPossible && shouldCheckForAddress(talkGroupID, id, systemName)) {
-    await extractAndProcessAddress(id, transcriptionText, talkGroupID, systemName);
+    if (llmQueue.isAvailable()) {
+      await extractAndProcessAddress(id, transcriptionText, talkGroupID, systemName);
+    } else {
+      // The AI isn't answering: post the call now instead of holding it, and
+      // add the location once the queued request is answered.
+      logger.info(`AI is not answering; posting call ${id} now and adding its location when the AI is back`);
+      lateLocation = extractAndProcessAddress(id, transcriptionText, talkGroupID, systemName);
+    }
   } else if (transcriptionText.length < 15) {
     logger.info(`Skipping address extraction for short transcription (ID ${id}): ${transcriptionText.length} characters`);
   } else if (!locationPossible) {
@@ -4324,6 +4338,30 @@ async function analyzeCall(id, transcriptionText, talkGroupID, talkGroupName, sy
 
     logger.info(`Tone detection completed for ID ${id}`);
   }
+  return lateLocation;
+}
+
+// For a call posted while the AI was not answering: once its address lookup
+// finishes, add the location (and map link) to the call's Discord message.
+async function addLateLocation(entry) {
+  const row = await new Promise((resolve) => {
+    db.get('SELECT address, lat, lon, category FROM transcriptions WHERE id = ?', [entry.id],
+      (err, r) => resolve(err ? null : r));
+  });
+  if (!row || row.lat == null || row.lon == null) return;
+  Object.assign(entry.details, { address: row.address, lat: row.lat, lon: row.lon, category: row.category });
+  entry.mapUrl = scannerMapCallUrl(entry.id);
+  const state = callMessageStates.get(String(entry.id));
+  if (state && state.message) {
+    try {
+      state.message = await state.message.edit({ embeds: [buildCallEmbed(state)] });
+      syncStateCacheFields(state);
+      logger.info(`Added the location to the Discord message for call ${entry.id}`);
+    } catch (e) {
+      logger.warn(`Could not add the location to the Discord message for call ${entry.id}: ${e.message}`);
+    }
+  }
+  scheduleCategoryRefresh(entry);
 }
 
 // Keyword alerts shared by normal and merged calls; messageUrl links the alert
@@ -4391,7 +4429,7 @@ async function handleNewTranscription(
 
   try {
     // Two-tone queueing, address extraction and tone detection
-    await analyzeCall(id, transcriptionText, talkGroupID, talkGroupName, systemName, audioFilePath);
+    const lateLocation = await analyzeCall(id, transcriptionText, talkGroupID, talkGroupName, systemName, audioFilePath);
 
     const details = await gatherCallDetails(id, transcriptionText, talkGroupID);
     const entry = buildCallEntry({
@@ -4409,6 +4447,7 @@ async function handleNewTranscription(
     });
     const messageUrl = await postCallMessage(entry, talkGroupID, talkGroupName, systemName);
     scheduleCategoryRefresh(entry);
+    if (lateLocation) lateLocation.then(() => addLateLocation(entry)).catch(() => {});
 
     // Keyword alert linking back to the message
     await alertOnKeywords(entry, talkGroupName, systemName, messageUrl);
@@ -4425,7 +4464,25 @@ async function handleNewTranscription(
   }
 }
 
+// Calls whose address lookup is running or waiting on the AI, so a tone
+// follow-up doesn't queue a second lookup for the same call.
+const addressLookupsInFlight = new Set();
+
 async function extractAndProcessAddress(id, transcriptionText, talkGroupID, systemName) {
+  const key = String(id);
+  if (addressLookupsInFlight.has(key)) {
+    logger.info(`Address extraction for ID ${id} is already in progress`);
+    return;
+  }
+  addressLookupsInFlight.add(key);
+  try {
+    await extractAndProcessAddressNow(id, transcriptionText, talkGroupID, systemName);
+  } finally {
+    addressLookupsInFlight.delete(key);
+  }
+}
+
+async function extractAndProcessAddressNow(id, transcriptionText, talkGroupID, systemName) {
   logger.info(`Starting address extraction for ID ${id}`);
   
   try {
@@ -5012,12 +5069,12 @@ function summaryTimeLabel(ts) {
 // and num_ctx as Scanner Map's other requests, so the loaded model is reused
 // rather than reloaded.
 async function summaryAiCompletion(prompt) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), SUMMARY_AI_TIMEOUT_MS);
+  // Lowest priority in the shared AI queue: live address extraction goes first.
+  const queueOpts = { label: 'Summary', timeoutMs: SUMMARY_AI_TIMEOUT_MS, priority: 'low' };
   try {
     if (AI_PROVIDER.toLowerCase() === 'openai') {
       if (!OPENAI_API_KEY) throw new Error('OpenAI API key is not configured.');
-      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      const response = await llmQueue.request('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${OPENAI_API_KEY}` },
         body: JSON.stringify({
@@ -5026,13 +5083,12 @@ async function summaryAiCompletion(prompt) {
           temperature: 0.2,
           response_format: { type: 'json_object' },
         }),
-        signal: controller.signal,
-      });
+      }, queueOpts);
       if (!response.ok) throw new Error(`OpenAI API error ${response.status}: ${await response.text()}`);
       const result = await response.json();
       return result.choices?.[0]?.message?.content || '';
     }
-    const response = await fetch(`${OLLAMA_URL}/api/generate`, {
+    const response = await llmQueue.request(`${OLLAMA_URL}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -5044,15 +5100,12 @@ async function summaryAiCompletion(prompt) {
         // Ollama serves one request at a time, so cap the reply to keep address extraction from waiting long.
         options: { num_ctx: 8192, temperature: 0.2, num_predict: 900 },
       }),
-      signal: controller.signal,
-    });
+    }, queueOpts);
     if (!response.ok) throw new Error(`Ollama API error ${response.status}`);
     return (await response.json()).response || '';
   } catch (error) {
     if (error.name === 'AbortError') throw new Error(`AI request timed out after ${SUMMARY_AI_TIMEOUT_MS / 1000}s`);
     throw error;
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -6301,9 +6354,8 @@ User Question: ${userQuestion}
 
         logger.info(`Ask AI Prompt for TG ${talkGroupID} (Length: ${commonPrompt.length}, First 100 chars): ${commonPrompt.substring(0, 100)}...`);
 
-        // 5. Call AI Provider
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 60000); 
+        // 5. Call AI Provider (through the shared AI queue; someone is waiting, so it goes first)
+        const queueOpts = { label: 'Ask AI', timeoutMs: 60000, priority: 'high' };
 
         let aiResponseText = 'Error: Could not get response from AI.';
         try {
@@ -6313,7 +6365,7 @@ User Question: ${userQuestion}
                 }
                 logger.info(`[Bot] Answering question with OpenAI model: ${OPENAI_MODEL}`);
 
-                const response = await fetch('https://api.openai.com/v1/chat/completions', {
+                const response = await llmQueue.request('https://api.openai.com/v1/chat/completions', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -6325,8 +6377,7 @@ User Question: ${userQuestion}
                         temperature: 0.5,
                         max_tokens: 500
                     }),
-                    signal: controller.signal
-                });
+                }, queueOpts);
                 if (!response.ok) {
                     const errorBody = await response.text();
                     throw new Error(`OpenAI API error! status: ${response.status}. Body: ${errorBody}`);
@@ -6339,7 +6390,7 @@ User Question: ${userQuestion}
             } else { // Default to Ollama
                 logger.info(`[Bot] Answering question with Ollama model: ${OLLAMA_MODEL}`);
 
-                const response = await fetch(`${OLLAMA_URL}/api/generate`, {
+                const response = await llmQueue.request(`${OLLAMA_URL}/api/generate`, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
@@ -6348,8 +6399,7 @@ User Question: ${userQuestion}
                       stream: false,
                       options: { num_ctx: 8192 }
                     }),
-                    signal: controller.signal
-                });
+                }, queueOpts);
                 if (!response.ok) {
                     throw new Error(`Ollama API error! status: ${response.status}`);
                 }
@@ -6357,18 +6407,18 @@ User Question: ${userQuestion}
                 aiResponseText = data.response || 'Error: AI returned an empty response.';
             }
 
-            clearTimeout(timeout); 
-
             // --- ADDED: Remove <think> block from both providers ---
             const thinkBlockRegex = /<think>[\s\S]*?<\/think>\s*/;
             aiResponseText = aiResponseText.replace(thinkBlockRegex, '').trim();
             // --- END ADDED ---
 
         } catch (fetchError) {
-            clearTimeout(timeout); 
             if (fetchError.name === 'AbortError') {
                 logger.error(`Ask AI Error: Request timed out (60s) for TG ${talkGroupID}`);
                 aiResponseText = 'Error: The request to the AI timed out.';
+            } else if (fetchError.name === 'LlmUnavailableError') {
+                logger.warn(`Ask AI for TG ${talkGroupID}: ${fetchError.message}`);
+                aiResponseText = "Error: The AI isn't answering right now. Please try again in a few minutes.";
             } else {
                 logger.error(`Ask AI Fetch Error for TG ${talkGroupID}:`, fetchError);
                 aiResponseText = 'Error: Could not connect to the AI service.';
@@ -6624,6 +6674,8 @@ function applyLiveSettings(changed) {
   const has = (test) => changed.some(test);
 
   if (has((k) => k === 'LOG_LEVEL')) require('./src/logger').applyLevel();
+  // A new AI server, model or key deserves a fresh try rather than waiting out an old backoff
+  if (has((k) => AI_CONNECTION_KEYS.has(k))) llmQueue.reset();
   if (has((k) => k === 'WEBSERVER_PASSWORD')) updateAdminPassword();
   else if (has((k) => k === 'ENABLE_AUTH')) createAdminUser().catch((e) => logger.error(`Could not create the admin user: ${e.message}`));
   if (has((k) => k === 'STORAGE_RETRY_INTERVAL_MIN')) reschedulePendingUploads();
@@ -6643,6 +6695,7 @@ function applyLiveSettings(changed) {
   if (needRestart.length) logger.warn(`Restart Scanner Map to apply: ${needRestart.join(', ')}`);
 }
 
+const AI_CONNECTION_KEYS = new Set(['AI_PROVIDER', 'OLLAMA_URL', 'OLLAMA_MODEL', 'OPENAI_API_KEY', 'OPENAI_MODEL']);
 liveEnv.onChange((changed) => applyLiveSettings(changed));
 liveEnv.watch();
 

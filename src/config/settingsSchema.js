@@ -37,6 +37,7 @@ const SECTIONS = [
 const WEB_KEYS = new Set([
   'AI_PROVIDER', 'ENABLE_AUTH', 'GOOGLE_MAPS_API_KEY', 'LOCAL_AUDIO_DIR', 'LOCATIONIQ_API_KEY',
   'LOG_CONSOLE_VERBOSE', 'LOG_LEVEL', 'MAP_CENTER_LAT', 'MAP_CENTER_LON', 'MAP_DEFAULT_ZOOM',
+  'AI_BACKOFF_MAX_SEC', 'AI_MAX_CONCURRENT', 'AI_QUEUE_MAX', 'AI_QUEUE_WAIT_SEC',
   'MAX_SESSIONS_PER_USER', 'OLLAMA_MODEL', 'OLLAMA_URL', 'OPENAI_API_KEY', 'OPENAI_MODEL',
   'PROTECT_AUDIO', 'PUBLIC_DOMAIN', 'S3_ACCESS_KEY_ID', 'S3_BUCKET_NAME', 'S3_ENDPOINT',
   'S3_FORCE_PATH_STYLE', 'S3_PUBLIC_BASE_URL', 'S3_REGION', 'S3_SECRET_ACCESS_KEY',
@@ -115,6 +116,10 @@ add('ai', 'OLLAMA_URL', 'Ollama URL', 'text', 'http://localhost:11434', '', { gu
 add('ai', 'OLLAMA_MODEL', 'Ollama model', 'text', 'llama3.1:8b', '', { guided: 'AI Features' });
 add('ai', 'OPENAI_API_KEY', 'OpenAI API key', 'secret', '', 'Also used by OpenAI transcription.', { guided: 'AI Features' });
 add('ai', 'OPENAI_MODEL', 'OpenAI model', 'text', 'gpt-4o-mini', '', { guided: 'AI Features' });
+add('ai', 'AI_MAX_CONCURRENT', 'AI requests at once', 'number', '', 'Blank = 1 for Ollama (it answers one at a time), 4 for OpenAI.');
+add('ai', 'AI_QUEUE_MAX', 'AI queue size', 'number', '30', 'Most requests waiting at once; when full, the oldest, least important one is dropped.');
+add('ai', 'AI_QUEUE_WAIT_SEC', 'AI queue wait (s)', 'number', '120', 'How long a request waits for its turn (or for the AI to come back) before giving up.');
+add('ai', 'AI_BACKOFF_MAX_SEC', 'Longest AI retry pause (s)', 'number', '300', 'When the AI stops answering, requests are held 5s, 10s, 20s ... up to this, then one is sent to check.');
 
 // ---- Transcription
 add('transcription', 'TRANSCRIPTION_MODE', 'Transcriber', 'select', 'local', 'local = faster-whisper on this PC.', { options: ['local', 'remote', 'openai', 'icad'], guided: 'Transcription' });

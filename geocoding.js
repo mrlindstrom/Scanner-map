@@ -6,6 +6,7 @@ const winston = require('winston');
 const { getFileTransports } = require('./src/logger');
 const { consoleFormat } = require('./src/consoleFormat');
 const streets = require('./src/geocoding/streets');
+const llmQueue = require('./src/ai/llmQueue');
 const moment = require('moment-timezone');
 const fs = require('fs');
 const path = require('path');
@@ -347,11 +348,7 @@ function addressAnchoredInTranscript(address, transcript) {
 async function callLLM(prompt, opts = {}) {
   const maxTokens = opts.maxTokens || 800;
   const timeoutMs = opts.timeoutMs || (parseInt(process.env.AI_EXTRACT_TIMEOUT_MS, 10) || 30000);
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => {
-    logger.warn(`[Geocoding] AI request timed out after ${timeoutMs / 1000}s.`);
-    controller.abort();
-  }, timeoutMs);
+  const queueOpts = { label: 'Address check', timeoutMs };
   try {
     let text = '';
     if (AI_PROVIDER.toLowerCase() === 'openai') {
@@ -359,7 +356,7 @@ async function callLLM(prompt, opts = {}) {
         logger.error('[Geocoding] AI_PROVIDER is openai but OPENAI_API_KEY is not configured!');
         return null;
       }
-      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      const response = await llmQueue.request('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENAI_API_KEY}` },
         body: JSON.stringify({
@@ -368,8 +365,7 @@ async function callLLM(prompt, opts = {}) {
           temperature: 0.1,
           max_tokens: maxTokens,
         }),
-        signal: controller.signal,
-      });
+      }, queueOpts);
       if (!response.ok) {
         const errorBody = await response.text();
         throw new Error(`OpenAI API error! status: ${response.status}. Body: ${errorBody}`);
@@ -379,7 +375,7 @@ async function callLLM(prompt, opts = {}) {
         text = result.choices[0].message.content.trim();
       }
     } else {
-      const response = await fetch(`${OLLAMA_URL}/api/generate`, {
+      const response = await llmQueue.request(`${OLLAMA_URL}/api/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -389,8 +385,7 @@ async function callLLM(prompt, opts = {}) {
           think: false,
           options: { temperature: 0, top_p: 0.1, num_predict: maxTokens, num_ctx: 8192 },
         }),
-        signal: controller.signal,
-      });
+      }, queueOpts);
       if (!response.ok) throw new Error(`Ollama API error! status: ${response.status}`);
       const result = await response.json();
       text = (result.response || '').trim();
@@ -404,12 +399,12 @@ async function callLLM(prompt, opts = {}) {
   } catch (error) {
     if (error.name === 'AbortError') {
       logger.error(`[Geocoding] AI request timed out: ${error.message}`);
+    } else if (error.name === 'LlmUnavailableError') {
+      logger.warn(`[Geocoding] ${error.message}`);
     } else {
       logger.error(`[Geocoding] AI request failed: ${error.message}`);
     }
     return null;
-  } finally {
-    clearTimeout(timeoutId);
   }
 }
 
@@ -508,13 +503,9 @@ Do not wrap the answer in quotes and do not add any commentary.
 Transcript (from ${town}):
 "${transcript}"`;
 
-    // Add AbortController for timeout
-    const controller = new AbortController();
+    // Sent through the shared AI queue, which also times the request out
     const AI_TIMEOUT_MS = parseInt(process.env.AI_EXTRACT_TIMEOUT_MS, 10) || 30000;
-    const timeoutId = setTimeout(() => {
-        logger.warn(`[Geocoding] AI request timed out after ${AI_TIMEOUT_MS / 1000}s for address extraction.`);
-        controller.abort();
-    }, AI_TIMEOUT_MS);
+    const queueOpts = { label: 'Address extraction', timeoutMs: AI_TIMEOUT_MS };
 
     let extractedAddress = '';
 
@@ -525,7 +516,7 @@ Transcript (from ${town}):
         }
         logger.info(`[Geocoding] Extracting address with OpenAI model: ${OPENAI_MODEL}`);
 
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        const response = await llmQueue.request('https://api.openai.com/v1/chat/completions', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -537,8 +528,7 @@ Transcript (from ${town}):
                 temperature: 0.1, // Very low temp for extraction
                 max_tokens: 50
             }),
-            signal: controller.signal
-        });
+        }, queueOpts);
 
         if (!response.ok) {
             const errorBody = await response.text();
@@ -552,7 +542,7 @@ Transcript (from ${town}):
     } else { // Default to Ollama
         logger.info(`[Geocoding] Extracting address with Ollama model: ${OLLAMA_MODEL}`);
 
-        const response = await fetch(`${OLLAMA_URL}/api/generate`, {
+        const response = await llmQueue.request(`${OLLAMA_URL}/api/generate`, {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({
@@ -569,8 +559,7 @@ Transcript (from ${town}):
             // transcript intermittently yields "No address found".
             options: { temperature: 0, top_p: 0.1, num_predict: 800, num_ctx: 8192 }
           }),
-          signal: controller.signal
-        });
+        }, queueOpts);
 
         if (!response.ok) {
           throw new Error(`Ollama API error! status: ${response.status}`);
@@ -579,8 +568,6 @@ Transcript (from ${town}):
         const result = await response.json();
         extractedAddress = result.response.trim();
     }
-    
-    clearTimeout(timeoutId);
 
     // --- ADDED: Remove <think> block (reasoning models: qwen3, deepseek-r1, …) ---
     // Some Ollama builds also return reasoning in a separate "thinking" field and
@@ -620,6 +607,10 @@ Transcript (from ${town}):
     if (error.name === 'AbortError') {
          logger.error(`[Geocoding] AI request timed out during address extraction: ${error.message}`);
          return null; // Return null on timeout
+    }
+    if (error.name === 'LlmUnavailableError') {
+      logger.warn(`[Geocoding] ${error.message}`);
+      return null;
     }
     logger.error(`Error extracting address with LLM: ${error.message}`);
     return null;
