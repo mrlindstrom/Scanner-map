@@ -256,6 +256,24 @@ const STREET_SUFFIX_WORDS = new Set([
 ]);
 const STREET_SUFFIX_RE = /\b(st|street|ave|avenue|rd|road|dr|drive|ln|lane|blvd|boulevard|pkwy|parkway|hwy|highway|way|circle|cir|court|ct|place|pl|terrace|trl|trail|loop|run|row|square|sq)\b/i;
 
+// Fire dispatches end with the dispatch time: "...646 East Louetta Road. At
+// Whitewood Drive 1207." / "...Old Louetta Road, at 0416." Right after a street
+// name the time reads like a house number ("1207 Whitewood Drive"), so it is
+// removed before the AI sees the transcript. Only a valid 24-hour time at the
+// end of a sentence counts, and highway/loop/FM numbers are left alone
+// ("Highway 249", "FM 1960").
+const DISPATCH_TIME = String.raw`(?:[01]\d|2[0-3])[0-5]\d`;
+const DISPATCH_TIME_END = String.raw`(?=\s*(?:[.;!?]|,\s|$))`;
+const DISPATCH_TIME_SUFFIXES = [...STREET_SUFFIX_WORDS].filter((w) => !['hwy', 'highway', 'loop', 'block'].includes(w));
+const DISPATCH_TIME_AFTER_STREET_RE = new RegExp(String.raw`\b(${DISPATCH_TIME_SUFFIXES.join('|')})\.?,?\s+${DISPATCH_TIME}${DISPATCH_TIME_END}`, 'gi');
+const DISPATCH_TIME_AT_RE = new RegExp(String.raw`,?\s+at\s+${DISPATCH_TIME}${DISPATCH_TIME_END}`, 'gi');
+
+function stripDispatchTimes(transcript) {
+  return String(transcript || '')
+    .replace(DISPATCH_TIME_AFTER_STREET_RE, '$1')
+    .replace(DISPATCH_TIME_AT_RE, '');
+}
+
 /**
  * Strip trailing city/state from a normalized address for structural checks.
  */
@@ -488,6 +506,7 @@ Examples that are NOT locations (respond: No address found):
 - "Copy that, unit 5 responding, 10-4 received"
 - "Reference 7-9-0-8" (digits alone, no street name follows)
 - "723" (a number without a street or place name)
+- A four-digit number at the very end of a dispatch is the dispatch time, never a house number ("646 East Louetta Road. At Whitewood Drive 1207." -> 646 East Louetta Road)
 
 Formatting:
 - Address: 123 Main St (add ", City" only when the city is spoken: 123 Main St, Tomball)
@@ -993,7 +1012,9 @@ async function extractAddress(transcript, talkGroupId, systemName) {
     townForLLMPrompt = legacyTown;
   }
 
-  let extractedAddress = await extractAddressWithLLM(transcript, townForLLMPrompt);
+  const transcriptForLLM = stripDispatchTimes(transcript);
+  if (transcriptForLLM !== transcript) logger.info(`[Geocoding] Removed the dispatch time before extraction: "${transcriptForLLM.slice(0, 200)}"`);
+  let extractedAddress = await extractAddressWithLLM(transcriptForLLM, townForLLMPrompt);
 
   if (!extractedAddress) {
     return null;
