@@ -260,12 +260,15 @@ const STREET_SUFFIX_RE = /\b(st|street|ave|avenue|rd|road|dr|drive|ln|lane|blvd|
 // Whitewood Drive 1207." / "...Old Louetta Road, at 0416." Right after a street
 // name the time reads like a house number ("1207 Whitewood Drive"), so it is
 // removed before the AI sees the transcript. Only a valid 24-hour time at the
-// end of a sentence counts, and highway/loop/FM numbers are left alone
-// ("Highway 249", "FM 1960").
-const DISPATCH_TIME = String.raw`(?:[01]\d|2[0-3])[0-5]\d`;
+// end of a sentence counts: four digits, or three when the hour is said without
+// its leading zero ("at Kurgendall Road 100." is 1:00). Roads whose number is
+// part of the name are left alone ("Highway 249", "FM 1960", "Forest Service
+// Road 231", "County Road 518").
+const DISPATCH_TIME = String.raw`(?:[01]\d|2[0-3]|[1-9])[0-5]\d`;
 const DISPATCH_TIME_END = String.raw`(?=\s*(?:[.;!?]|,\s|$))`;
 const DISPATCH_TIME_SUFFIXES = [...STREET_SUFFIX_WORDS].filter((w) => !['hwy', 'highway', 'loop', 'block'].includes(w));
-const DISPATCH_TIME_AFTER_STREET_RE = new RegExp(String.raw`\b(${DISPATCH_TIME_SUFFIXES.join('|')})\.?,?\s+${DISPATCH_TIME}${DISPATCH_TIME_END}`, 'gi');
+const NUMBERED_ROAD_PREFIX = String.raw`(?<!\b(?:service|county|farm|market|ranch|private|state|forest|fm|cr|pr)\s+)`;
+const DISPATCH_TIME_AFTER_STREET_RE = new RegExp(String.raw`${NUMBERED_ROAD_PREFIX}\b(${DISPATCH_TIME_SUFFIXES.join('|')})\.?,?\s+${DISPATCH_TIME}${DISPATCH_TIME_END}`, 'gi');
 const DISPATCH_TIME_AT_RE = new RegExp(String.raw`,?\s+at\s+${DISPATCH_TIME}${DISPATCH_TIME_END}`, 'gi');
 
 function stripDispatchTimes(transcript) {
@@ -506,7 +509,7 @@ Examples that are NOT locations (respond: No address found):
 - "Copy that, unit 5 responding, 10-4 received"
 - "Reference 7-9-0-8" (digits alone, no street name follows)
 - "723" (a number without a street or place name)
-- A four-digit number at the very end of a dispatch is the dispatch time, never a house number ("646 East Louetta Road. At Whitewood Drive 1207." -> 646 East Louetta Road)
+- A three- or four-digit number at the very end of a dispatch, after the cross street, is the dispatch time, never a house number ("646 East Louetta Road. At Whitewood Drive 1207." -> 646 East Louetta Road; "2218 1960 Road West, at Kurgendall Road 100." -> 2218 1960 Road West)
 
 Formatting:
 - Address: 123 Main St (add ", City" only when the city is spoken: 123 Main St, Tomball)
