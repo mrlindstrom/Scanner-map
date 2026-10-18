@@ -66,7 +66,9 @@ function timeFormatter() {
 function highlight(message, level) {
   const base = level === 'error' ? C.red : level === 'warn' ? C.yellow : null;
 
-  let m = message.match(/^Transcription Text:\s*(?:\(([^)]+)\)\s+)?([\s\S]*)$/);
+  // The speaker name may hold one level of parentheses: "Unit-1 (+Unit-2)" is a
+  // turn too short to cut out, folded into the speaker before it.
+  let m = message.match(/^Transcription Text:\s*(?:\(((?:[^()]|\([^()]*\))+)\)\s+)?([\s\S]*)$/);
   if (m) {
     return m[1]
       ? [[`${m[1]}: `, C.magenta + C.bold], [m[2], C.cyan]]
