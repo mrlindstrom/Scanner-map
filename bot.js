@@ -4051,12 +4051,12 @@ function splitAudioFile(audioFilePath, segments, callback) {
     if (audioDuration && SEGMENT_ALIGN_CONFIG.enabled) {
       try {
         const silences = await segmentAlign.detectSilences(audioFilePath, SEGMENT_ALIGN_CONFIG);
-        const aligned = segmentAlign.alignSegments(segments, silences, audioDuration);
+        const aligned = segmentAlign.alignSegments(segments, silences, audioDuration, { minSegmentSec: MERGED_CALL_MIN_SEGMENT_SEC });
         if (aligned) {
           aligned.forEach((s) => {
             if (s.foldedSources) s.sourceDisplay = `${s.sourceDisplay} (+${s.foldedSources.join(', ')})`;
           });
-          logger.info(`Aligned speaker changes to audio (${aligned.audioRelative ? 'audio positions' : 'wall-clock positions'}): ${segments.slice(1).map((s) => s.startPos).join(', ')}s -> ` +
+          logger.info(`Aligned speaker changes to audio (${aligned.mode}): ${segments.slice(1).map((s) => s.startPos).join(', ')}s -> ` +
             `${aligned.slice(1).map((s) => s.startPos.toFixed(2)).join(', ')}s` +
             (aligned.length < segments.length ? ` (${segments.length - aligned.length} too short to separate)` : ''));
           segments = aligned;

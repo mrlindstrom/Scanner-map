@@ -64,7 +64,7 @@ Ideas adapted from [RadioTranscriber](https://github.com/Nite01007/RadioTranscri
 TrunkRecorder sometimes sends several radios in one recording.
 
 - **Safer per-speaker splitting:**
-  - **speaker changes are snapped to real silences in the recording.** Older TrunkRecorder Pro positions are whole wall-clock seconds and drift past the audio; in a test on 20 calls only 7 of 32 of its cut points landed in a pause. Positions in the audio (Trunk Recorder, newer Pro releases) are detected automatically and only nudged to a nearby pause. `MERGED_CALL_ALIGN_SILENCE`, `MERGED_CALL_SILENCE_*`
+  - **speaker changes are snapped to real silences in the recording.** TrunkRecorder Pro sends positions in the audio but in whole seconds; in 250 of its calls speech started between ~0.75 s before and ~1.5 s after the reported second, and 7% of speaker changes shared a second with the one before. Each change is placed on its own pause in that window, in order and at least `MERGED_CALL_MIN_SEGMENT_SEC` apart, so a short key-up gets its own line instead of being folded into the speaker before it (folded turns fell from 101 to 13 of 445). Sub-second positions (Trunk Recorder, and TrunkRecorder Pro if it starts sending them) are detected automatically and only nudged to a pause within 0.5 s. Positions that run past the end of the recording are treated as the old wall-clock format. `MERGED_CALL_ALIGN_SILENCE`, `MERGED_CALL_SILENCE_*`
   - segments are clamped to the real audio length
   - key-ups, kerchunks and empty pieces are dropped
   - if fewer than two usable segments are left, the whole call is transcribed as one

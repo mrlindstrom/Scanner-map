@@ -3,12 +3,18 @@
 /**
  * Line up merged-call speaker changes with the actual recording.
  *
- * Two kinds of per-source `pos` values arrive:
+ * Three kinds of per-source `pos` values arrive:
  *
- *   - Audio positions (Trunk Recorder, and TrunkRecorder Pro since the release
- *     that put srcList positions "in the audio"): fractional seconds into the
- *     saved file. They are already close, so each change is only nudged to a
- *     silence within NUDGE_WINDOW of it, and kept where it is otherwise.
+ *   - Fractional audio positions (Trunk Recorder, and TrunkRecorder Pro if it
+ *     sends sub-second positions): seconds into the saved file. They are
+ *     already close, so each change is only nudged to a silence within
+ *     NUDGE_WINDOW of it, and kept where it is otherwise.
+ *   - Whole-second audio positions (TrunkRecorder Pro today): seconds into the
+ *     saved file, but whole seconds. In a sample of 250 calls speech started
+ *     between ~0.75s before and ~1.5s after `pos` (most often ~0.3s after), and
+ *     7% of changes shared a second with the one before (a turn under a
+ *     second). Each change is placed on its own silence in that window, in
+ *     order (see alignWholeSeconds), or on its estimated start when none fits.
  *   - Wall-clock positions (older TrunkRecorder Pro): whole seconds since the
  *     call was granted, counting the dead air the recording leaves out, so the
  *     further into a call, the later `pos` runs ahead of the audio (often past
@@ -115,13 +121,28 @@ function isAudioRelative(positions, duration) {
   return fractional && Math.max(...positions) <= duration + 0.25;
 }
 
-const NUDGE_WINDOW = 0.5; // seconds an audio position may move to reach a silence
+/** Positions given in whole seconds (no fractional part on any of them). */
+function isWholeSeconds(positions) {
+  return positions.length > 0 && positions.every((p) => Math.abs(p - Math.round(p)) < 1e-6);
+}
 
-/** Audio positions: move each change to the nearest silence close by, or keep it. */
-function nudgeBoundaries(positions, silences, duration) {
-  const cuts = silences
+// Where to cut for each silence: just before the next speech starts. The
+// lead-in and trailing silence are not speaker changes.
+function silenceCuts(silences, duration) {
+  return silences
     .filter((s) => s.start > 0.05 && s.end < duration - 0.05)
     .map((s) => Math.max(s.start, s.end - 0.1));
+}
+
+const NUDGE_WINDOW = 0.5; // seconds an audio position may move to reach a silence
+
+/**
+ * Fractional audio positions: move each change to the nearest silence close by,
+ * or keep it. A turn shorter than minSegmentSec is folded (null) rather than
+ * cut out, since a clip that short is dropped before transcription.
+ */
+function nudgeBoundaries(positions, silences, duration, minSegmentSec = 0) {
+  const cuts = silenceCuts(silences, duration);
   let prev = 0;
   return positions.map((pos) => {
     let best = null;
@@ -130,9 +151,70 @@ function nudgeBoundaries(positions, silences, duration) {
       if (best === null || Math.abs(c - pos) < Math.abs(best - pos)) best = c;
     }
     const cut = Math.min(Math.max(best ?? pos, prev), duration);
+    if (minSegmentSec > 0 && (cut - prev < minSegmentSec || duration - cut < minSegmentSec)) return null;
     prev = cut;
     return cut;
   });
+}
+
+// Whole-second positions: where speech starts relative to `pos` (measured on TRP calls)
+const WHOLE_SEC_OFFSET = 0.3;   // most likely start: pos + 0.3s
+const WHOLE_SEC_EARLY = 1.0;    // earliest cut considered: pos - 1s
+const WHOLE_SEC_LATE = 1.75;    // latest cut considered: pos + 1.75s
+const ESTIMATE_COST = 1.0;      // extra cost of cutting where there's no silence (may split a word)
+const WHOLE_SEC_SKIP_COST = 4.0;
+
+/**
+ * Whole-second audio positions: give each change its own silence in its window,
+ * keeping order and at least minSegmentSec per turn, at the lowest total
+ * distance from pos + WHOLE_SEC_OFFSET. A change with no free silence is cut at
+ * its estimated start; it is folded into the previous turn (null) only when
+ * even that leaves no room.
+ * @returns {(number|null)[]} audio cut time per change, or null when folded
+ */
+function alignWholeSeconds(positions, silences, duration, minSegmentSec = 0) {
+  const cuts = silenceCuts(silences, duration);
+  const gap = Math.max(minSegmentSec, 0.05);
+  const lastIdxAtOrBefore = (t) => {
+    let i = -1;
+    while (i + 1 < cuts.length && cuts[i + 1] <= t) i++;
+    return i;
+  };
+  let states = [{ cost: 0, lastCut: 0, lastIdx: -1, picks: [] }];
+  for (const p of positions) {
+    const target = p + WHOLE_SEC_OFFSET;
+    const next = new Map();
+    const keep = (st) => {
+      const key = `${st.lastIdx}:${st.lastCut.toFixed(2)}`;
+      const prev = next.get(key);
+      if (!prev || st.cost < prev.cost) next.set(key, st);
+    };
+    for (const st of states) {
+      // Fold into the previous turn
+      keep({ ...st, cost: st.cost + WHOLE_SEC_SKIP_COST, picks: [...st.picks, null] });
+      // A silence in the window
+      for (let j = st.lastIdx + 1; j < cuts.length; j++) {
+        const c = cuts[j];
+        if (c > p + WHOLE_SEC_LATE) break;
+        if (c < p - WHOLE_SEC_EARLY || c < st.lastCut + gap || c > duration - gap) continue;
+        keep({ cost: st.cost + Math.abs(c - target), lastCut: c, lastIdx: j, picks: [...st.picks, c] });
+      }
+      // No silence: the estimated start
+      const e = Math.max(target, st.lastCut + gap);
+      if (e <= p + WHOLE_SEC_LATE && e <= duration - gap) {
+        keep({
+          cost: st.cost + ESTIMATE_COST + Math.abs(e - target),
+          lastCut: e,
+          lastIdx: Math.max(st.lastIdx, lastIdxAtOrBefore(e)),
+          picks: [...st.picks, e],
+        });
+      }
+    }
+    states = [...next.values()];
+  }
+  let best = states[0];
+  for (const st of states) if (st.cost < best.cost) best = st;
+  return best.picks;
 }
 
 /**
@@ -140,13 +222,25 @@ function nudgeBoundaries(positions, silences, duration) {
  * Returns new segment objects; changes that couldn't be placed are folded into
  * the previous segment. Returns null if nothing could be aligned.
  */
-function alignSegments(segments, silences, duration) {
+function alignSegments(segments, silences, duration, { minSegmentSec = 0 } = {}) {
   if (!segments || segments.length < 2 || !Number.isFinite(duration) || duration <= 0) return null;
   const positions = segments.slice(1).map((s) => s.startPos || 0);
-  const audioRelative = isAudioRelative(positions, duration);
-  const picks = audioRelative
-    ? nudgeBoundaries(positions, silences, duration)
-    : alignBoundaries(positions, silences, duration);
+  // Any fractional second: audio positions. Whole seconds inside the recording:
+  // TrunkRecorder Pro audio positions. Whole seconds running past the end: the
+  // older wall-clock positions.
+  let mode;
+  let picks;
+  if (isAudioRelative(positions, duration)) {
+    mode = 'audio positions';
+    picks = nudgeBoundaries(positions, silences, duration, minSegmentSec);
+  } else if (isWholeSeconds(positions) && Math.max(...positions) <= duration + 0.5) {
+    mode = 'whole-second audio positions';
+    picks = alignWholeSeconds(positions, silences, duration, minSegmentSec);
+  } else {
+    mode = 'wall-clock positions';
+    picks = alignBoundaries(positions, silences, duration);
+  }
+  const audioRelative = mode !== 'wall-clock positions';
 
   const out = [{ ...segments[0], startPos: 0, alignedFrom: segments[0].startPos }];
   picks.forEach((cut, i) => {
@@ -162,7 +256,11 @@ function alignSegments(segments, silences, duration) {
     out[i].endPos = i + 1 < out.length ? out[i + 1].startPos : duration;
   }
   out.audioRelative = audioRelative;
+  out.mode = mode;
   return out;
 }
 
-module.exports = { loadConfig, detectSilences, alignBoundaries, nudgeBoundaries, isAudioRelative, alignSegments };
+module.exports = {
+  loadConfig, detectSilences, alignBoundaries, nudgeBoundaries, alignWholeSeconds,
+  isAudioRelative, isWholeSeconds, alignSegments,
+};
