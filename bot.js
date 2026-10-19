@@ -6354,8 +6354,9 @@ User Question: ${userQuestion}
 
         logger.info(`Ask AI Prompt for TG ${talkGroupID} (Length: ${commonPrompt.length}, First 100 chars): ${commonPrompt.substring(0, 100)}...`);
 
-        // 5. Call AI Provider (through the shared AI queue; someone is waiting, so it goes first)
-        const queueOpts = { label: 'Ask AI', timeoutMs: 60000, priority: 'high' };
+        // 5. Call AI Provider (through the shared AI queue; someone is waiting, so it goes first).
+        // While an admin has paused the AI, say so now rather than after a long wait.
+        const queueOpts = { label: 'Ask AI', timeoutMs: 60000, priority: 'high', queueWhenDown: !llmQueue.isPausedByHand() };
 
         let aiResponseText = 'Error: Could not get response from AI.';
         try {
@@ -6418,7 +6419,9 @@ User Question: ${userQuestion}
                 aiResponseText = 'Error: The request to the AI timed out.';
             } else if (fetchError.name === 'LlmUnavailableError') {
                 logger.warn(`Ask AI for TG ${talkGroupID}: ${fetchError.message}`);
-                aiResponseText = "Error: The AI isn't answering right now. Please try again in a few minutes.";
+                aiResponseText = llmQueue.isPausedByHand()
+                    ? 'Error: The AI is paused by an admin right now. Please try again later.'
+                    : "Error: The AI isn't answering right now. Please try again in a few minutes.";
             } else {
                 logger.error(`Ask AI Fetch Error for TG ${talkGroupID}:`, fetchError);
                 aiResponseText = 'Error: Could not connect to the AI service.';
@@ -6465,6 +6468,12 @@ function isLoopback(req) {
 function discordGuild() {
   return client && client.guilds ? client.guilds.cache.first() : null;
 }
+
+// The AI queue's state, for the Pause AI button in Settings.
+app.get('/internal/ai/status', (req, res) => {
+  if (!isLoopback(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
+  res.json({ ok: true, status: llmQueue.status() });
+});
 
 // List the bot's text channels and categories so the UI can filter/sort and
 // select items to delete.

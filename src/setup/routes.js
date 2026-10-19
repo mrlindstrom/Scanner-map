@@ -18,6 +18,7 @@ const maintenance = require('./maintenance');
 const transcriptCorrections = require('../transcription/corrections');
 const settingsSchema = require('../config/settingsSchema');
 const liveEnv = require('../config/liveEnv');
+const llmQueue = require('../ai/llmQueue');
 
 // Proxy a request to the bot process's localhost-only internal API (where the
 // Discord client lives). The bot and webserver are separate processes.
@@ -501,6 +502,31 @@ function mountSetup(app, deps = {}) {
       });
       res.json({ ok: true, days, calls: rows.length, counts });
     });
+  });
+
+  // --- Pause AI (shared with the bot process through llmQueue's pause file) ---
+  // The bot's queue sends most AI requests, so its counts are shown when it's up.
+  async function aiPauseStatus() {
+    const bot = await botProxy('/internal/ai/status');
+    const here = llmQueue.status();
+    return {
+      ok: true,
+      paused: here.paused,
+      pausedSince: here.pausedSince,
+      bot: bot && bot.ok ? bot.status : null,
+    };
+  }
+  app.get('/api/setup/ai-pause', async (req, res) => res.json(await aiPauseStatus()));
+  app.post('/api/setup/ai-pause', async (req, res) => {
+    const paused = !!(req.body && req.body.paused);
+    try {
+      llmQueue.setManualPause(paused);
+    } catch (e) {
+      log.error(`could not ${paused ? 'pause' : 'resume'} the AI: ${e.message}`);
+      return res.status(500).json({ ok: false, error: e.message });
+    }
+    log.info(`AI ${paused ? 'paused' : 'resumed'} from Settings`);
+    res.json(await aiPauseStatus());
   });
 
   // --- Discord tools (proxied to the bot process) ---

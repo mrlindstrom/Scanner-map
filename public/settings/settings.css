@@ -227,6 +227,18 @@ code { background: var(--field-bg); border-color: var(--border); color: var(--te
 .save-indicator { color: var(--success); }
 ::selection { background: var(--primary); color: var(--on-primary); }
 
+/* Pause AI control in the sidebar */
+.ai-pause {
+  display: flex; flex-direction: column; gap: 6px;
+  margin: 0 0 18px; padding: 10px; border: 1px solid var(--border);
+  border-radius: var(--radius); background: var(--panel);
+}
+.ai-pause[hidden] { display: none; }
+.ai-pause.paused { border-color: var(--warn); }
+.ai-pause-btn { width: 100%; }
+.ai-pause-info { font-size: 12px; color: var(--muted); text-align: center; }
+.ai-pause.paused .ai-pause-info { color: var(--warn); }
+
 /* Theme picker in the sidebar */
 .theme-picker-row {
   display: flex; flex-direction: column; gap: 6px;

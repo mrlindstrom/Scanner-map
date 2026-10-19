@@ -2158,7 +2158,84 @@
       if (idx >= 0) current = idx;
     }
     renderStep();
+    if (SETTINGS_MODE) startAiPauseControl();
   }
+
+  // ---- Pause AI (sidebar header) -----------------------------------------
+  // Stops all requests to the AI provider (e.g. while Ollama is taken down)
+  // until resumed. The bot and web server pick it up within a couple of seconds.
+  function startAiPauseControl() {
+    const box = $('#ai-pause');
+    if (!box) return;
+    const btn = el('button', { class: 'btn btn-sm ai-pause-btn', type: 'button' }, '⏸️ Pause AI');
+    const info = el('div', { class: 'ai-pause-info' });
+    box.appendChild(btn);
+    box.appendChild(info);
+    let paused = null;
+    let busy = false;
+
+    function show(d) {
+      if (!d || !d.ok) {
+        box.hidden = !!(d && d.status === 403); // not an admin: nothing to offer
+        info.textContent = 'AI status unavailable';
+        btn.disabled = true;
+        return;
+      }
+      box.hidden = false;
+      paused = !!d.paused;
+      btn.disabled = busy;
+      btn.textContent = paused ? '▶️ Resume AI' : '⏸️ Pause AI';
+      btn.classList.toggle('btn-primary', paused);
+      box.classList.toggle('paused', paused);
+      const bot = d.bot || {};
+      const waiting = bot.waiting ? ` · ${bot.waiting} waiting` : '';
+      if (paused) {
+        const since = d.pausedSince ? new Date(d.pausedSince) : null;
+        const when = since && !isNaN(since)
+          ? ` since ${since.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
+          : '';
+        info.textContent = `AI paused${when}${waiting}`;
+      } else if (d.bot && bot.available === false) {
+        info.textContent = `AI not answering${bot.retryInSec ? `, retrying in ${bot.retryInSec}s` : ''}${waiting}`;
+      } else {
+        info.textContent = `AI running${waiting}`;
+      }
+    }
+
+    async function refresh() {
+      try {
+        const r = await adminFetch('/api/setup/ai-pause');
+        show(r.ok ? r.data : { ok: false, status: r.status });
+      } catch (_) {
+        show(null);
+      }
+    }
+
+    btn.addEventListener('click', async () => {
+      if (busy || paused == null) return;
+      busy = true;
+      btn.disabled = true;
+      const want = !paused;
+      try {
+        const r = await adminFetch('/api/setup/ai-pause', { method: 'POST', body: JSON.stringify({ paused: want }) });
+        if (!r.ok || !r.data || !r.data.ok) throw new Error((r.data && r.data.error) || `HTTP ${r.status}`);
+        toast(want
+          ? 'AI paused. Nothing is sent to the AI until you resume it.'
+          : 'AI resumed. Waiting requests are being sent.', 'ok');
+        busy = false;
+        show(r.data);
+      } catch (e) {
+        busy = false;
+        toast(`Could not ${want ? 'pause' : 'resume'} the AI: ${e.message}`, 'err');
+        refresh();
+      }
+    });
+
+    refresh();
+    setInterval(() => { if (!document.hidden) refresh(); }, 10000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+  }
+
   window.addEventListener('hashchange', () => {
     if (!SETTINGS_MODE) return;
     const slug = location.hash.slice(1).toLowerCase();

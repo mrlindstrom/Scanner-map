@@ -12,6 +12,7 @@ __pycache__/
 .env.bak
 data/apikeys.json
 data/apikeys.plain.json
+data/ai-paused.json
 
 # Backups (may contain secrets or live data)
 *.bak

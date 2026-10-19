@@ -14,9 +14,16 @@
  * - A request waits at most AI_QUEUE_WAIT_SEC, and at most AI_QUEUE_MAX wait at
  *   once; when it's full the oldest, least important request is dropped.
  *
+ * - An admin can pause the AI by hand (Settings > Pause AI, e.g. while taking
+ *   Ollama down). Nothing is sent until it's resumed; requests wait as above.
+ *   The pause is kept in data/ai-paused.json so the bot and web server
+ *   processes share it and it survives a restart.
+ *
  * Settings are read on every request, so changes apply right away.
  */
 
+const fs = require('fs');
+const path = require('path');
 const fetch = require('node-fetch');
 
 const PRIORITY = { high: 0, normal: 1, low: 2 };
@@ -46,6 +53,75 @@ let lastError = '';
 const dropped = { full: 0, expired: 0 };
 let dropLogTimer = null;
 
+// ---- Manual pause (shared between processes through a file) ----
+const PAUSE_FILE = process.env.SCANNER_AI_PAUSE_FILE || path.join(__dirname, '..', '..', 'data', 'ai-paused.json');
+const PAUSE_POLL_MS = 2000;
+let manual = null; // { since } while paused by hand
+let pauseStamp = null;
+let pausePoll = null;
+
+function readPauseFile() {
+  try {
+    const data = JSON.parse(fs.readFileSync(PAUSE_FILE, 'utf8'));
+    return data && data.paused ? { since: data.since || null } : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function pauseFileStamp() {
+  try {
+    const st = fs.statSync(PAUSE_FILE);
+    return `${st.mtimeMs}:${st.size}`;
+  } catch (_) {
+    return 'missing';
+  }
+}
+
+// Pick up a pause or resume made by the other process.
+function checkPauseFile() {
+  const st = pauseFileStamp();
+  if (st === pauseStamp) return;
+  pauseStamp = st;
+  const next = readPauseFile();
+  const was = !!manual;
+  manual = next;
+  if (was === !!next) return;
+  if (next) {
+    log.warn(`[AI] Paused by an admin; holding AI requests until it's resumed (${queue.length} waiting).`);
+  } else {
+    log.info(`[AI] Resumed by an admin; sending the ${queue.length} waiting request(s).`);
+    reset();
+  }
+}
+
+function watchPauseFile() {
+  if (pausePoll) return;
+  checkPauseFile();
+  pausePoll = setInterval(checkPauseFile, PAUSE_POLL_MS);
+  pausePoll.unref?.();
+}
+
+/**
+ * Pause or resume sending to the AI by hand. Applies to every process within a
+ * couple of seconds.
+ * @param {boolean} paused
+ */
+function setManualPause(paused) {
+  if (paused) {
+    fs.mkdirSync(path.dirname(PAUSE_FILE), { recursive: true });
+    fs.writeFileSync(PAUSE_FILE, JSON.stringify({ paused: true, since: new Date().toISOString() }, null, 2));
+  } else {
+    try { fs.unlinkSync(PAUSE_FILE); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  }
+  pauseStamp = null; // apply here now rather than on the next poll
+  checkPauseFile();
+}
+
+function isPausedByHand() {
+  return !!manual;
+}
+
 function num(key, def) {
   const v = parseFloat(process.env[key]);
   return Number.isFinite(v) && v >= 0 ? v : def;
@@ -65,14 +141,16 @@ function setLogger(logger) {
   log = logger || console;
 }
 
-/** True unless the provider recently stopped answering. */
+/** True unless the provider recently stopped answering or the AI is paused by hand. */
 function isAvailable() {
-  return backoffMs === 0;
+  return backoffMs === 0 && !manual;
 }
 
 function status() {
   return {
     available: isAvailable(),
+    paused: !!manual,
+    pausedSince: manual ? manual.since : null,
     waiting: queue.length,
     running,
     retryInSec: pausedUntil > Date.now() ? Math.ceil((pausedUntil - Date.now()) / 1000) : 0,
@@ -97,7 +175,8 @@ function noteDrop(kind) {
     const parts = [];
     if (dropped.expired) parts.push(`${dropped.expired} waited too long`);
     if (dropped.full) parts.push(`${dropped.full} didn't fit in the queue`);
-    log.warn(`[AI] Gave up on ${dropped.expired + dropped.full} AI request(s) in the last 30s: ${parts.join(', ')}${lastError ? ` (last error: ${lastError})` : ''}.`);
+    const why = manual ? 'the AI is paused' : lastError && `last error: ${lastError}`;
+    log.warn(`[AI] Gave up on ${dropped.expired + dropped.full} AI request(s) in the last 30s: ${parts.join(', ')}${why ? ` (${why})` : ''}.`);
     dropped.full = 0;
     dropped.expired = 0;
   }, 30000);
@@ -119,6 +198,10 @@ function noteDrop(kind) {
 function request(url, init = {}, opts = {}) {
   const s = settings();
   const label = opts.label || 'AI request';
+  checkPauseFile();
+  if (opts.queueWhenDown === false && manual) {
+    return Promise.reject(new LlmUnavailableError(`${label} skipped: the AI is paused`, 'paused'));
+  }
   if (opts.queueWhenDown === false && pausedUntil > Date.now()) {
     return Promise.reject(new LlmUnavailableError(`${label} skipped: the AI isn't answering${lastError ? ` (${lastError})` : ''}`, 'paused'));
   }
@@ -163,7 +246,8 @@ function enqueue(job) {
     if (i < 0) return;
     queue.splice(i, 1);
     noteDrop('expired');
-    job.reject(new LlmUnavailableError(`${job.label} gave up after waiting ${Math.round(job.waitMs / 1000)}s for the AI${lastError ? ` (${lastError})` : ''}`, 'expired'));
+    const why = manual ? 'the AI is paused' : lastError;
+    job.reject(new LlmUnavailableError(`${job.label} gave up after waiting ${Math.round(job.waitMs / 1000)}s for the AI${why ? ` (${why})` : ''}`, 'expired'));
   }, Math.max(0, job.deadline - Date.now()));
   job.waitTimer.unref?.();
   queue.push(job);
@@ -180,7 +264,7 @@ function takeNext() {
 }
 
 function pump() {
-  if (!queue.length) return;
+  if (!queue.length || manual) return; // resuming calls reset(), which pumps
   const now = Date.now();
   if (pausedUntil > now) {
     if (!pauseTimer) {
@@ -268,4 +352,8 @@ function recordSuccess() {
   lastError = '';
 }
 
-module.exports = { request, isAvailable, status, reset, setLogger, LlmUnavailableError };
+watchPauseFile();
+
+module.exports = {
+  request, isAvailable, status, reset, setLogger, setManualPause, isPausedByHand, LlmUnavailableError,
+};
