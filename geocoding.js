@@ -199,7 +199,7 @@ function townsForPlace(place) {
     const tw = normalizePlace(t).split(' ').filter((w) => w !== 'the');
     return tw.length && tw.every((w) => words.has(w));
   });
-  return [...new Set([...named, GEOCODING_CITY].filter(Boolean))].slice(0, 2);
+  return [...new Set(named.filter(Boolean))].slice(0, 2);
 }
 
 /**

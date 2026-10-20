@@ -120,6 +120,14 @@ function load(box, logger = console) {
   return loading;
 }
 
+// Same ending sound from the last vowel on ("peaks" / "creeks"), for words of
+// a similar length: speech-to-text mostly gets the start of a word wrong.
+function rhymes(a, b) {
+  const tail = (w) => { const m = w.match(/[aeiouy]+[^aeiouy]*$/); return m ? m[0].replace(/[aeiouy]+/, 'V') : w; };
+  const ratio = Math.min(a.length, b.length) / Math.max(a.length, b.length);
+  return ratio >= 0.7 && tail(a).length >= 2 && tail(a) === tail(b);
+}
+
 function count() {
   return places.length;
 }
@@ -159,10 +167,16 @@ function findPlace(spokenPlace, { areaWords = new Set() } = {}) {
   for (const p of candidates) {
     const theirs = p.words.filter((w) => w.length >= 3 && !streets.GENERIC_PLACE_WORDS.has(w));
     if (theirs.length !== distinctive.length) continue;
-    const sims = distinctive.map((w, i) => streets.wordSimilarity(w, theirs[i]));
-    const strong = sims.filter((s) => s >= 0.92).length;
-    // Every word close, or all but one word the same and that one not far off
-    const ok = sims.every((s) => s >= 0.86) || (strong >= 1 && strong === sims.length - 1 && Math.min(...sims) >= 0.6);
+    // Words of very different length aren't the same word misheard ("metro" / "met")
+    const similar = (a, b) => (Math.min(a.length, b.length) / Math.max(a.length, b.length) >= 0.7 ? streets.wordSimilarity(a, b) : 0);
+    const sims = distinctive.map((w, i) => similar(w, theirs[i]));
+    // Every word close, or one word misheard: the rest the same (not only
+    // kind words like "Methodist") and that one rhyming or nearly the same
+    // ("Twin Peaks" -> Twin Creeks, not "Willenburg" -> Woodlands)
+    const weak = sims.map((x, k) => (x >= 0.92 ? -1 : k)).filter((k) => k >= 0);
+    const sameName = distinctive.some((w, k) => sims[k] >= 0.92 && !streets.placeKindWords(w).length);
+    const ok = sims.every((x) => x >= 0.9)
+      || (weak.length === 1 && sameName && (sims[weak[0]] >= 0.8 || rhymes(distinctive[weak[0]], theirs[weak[0]])));
     if (!ok) continue;
     const score = sims.reduce((a, b) => a + b, 0) / sims.length;
     const entry = { ...p, score };

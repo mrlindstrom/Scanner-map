@@ -177,7 +177,9 @@ function placeMatches(spokenPlace, resultName, opts = {}) {
   const words = placeWords;
   const area = opts.areaWords || new Set();
   const target = words(resultName);
-  const found = (w) => target.some((t) => t === w || (w.length >= 5 && jaroWinkler(w, t) >= 0.92));
+  // Spelling may vary, but not the length: "marsh" is not "marshall"
+  const found = (w) => target.some((t) => t === w || (w.length >= 5
+    && Math.min(w.length, t.length) / Math.max(w.length, t.length) >= 0.8 && jaroWinkler(w, t) >= 0.92));
   // The kind of place, when the spoken name says it, has to agree ("Lewis
   // Elementary" is not Lewis Middle School, "Jesse Jones Park" not a library)
   if (!kindsAgree(spokenPlace, resultName)) return false;
