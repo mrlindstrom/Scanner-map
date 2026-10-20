@@ -139,17 +139,44 @@ const GENERIC_PLACE_WORDS = new Set(('the of and at in on park hospital medical 
   + 'complex village estates subdivision house home inn hotel motel restaurant bank library office building north south '
   + 'east west saint st health urgent emergency er department fire police sheriff county city').split(' '));
 
+// Words that say what kind of place it is. A spoken word from a group needs a
+// word from the same group in the result (school levels are kept apart).
+const PLACE_KINDS = [
+  ['elementary'], ['middle', 'junior'], ['intermediate'], ['high'],
+  ['school', 'elementary', 'middle', 'intermediate', 'junior', 'high', 'academy', 'isd'],
+  ['hospital', 'medical', 'er', 'emergency'],
+  ['park'], ['church', 'chapel', 'baptist', 'methodist', 'catholic', 'lutheran', 'ministries', 'fellowship'],
+  ['library'], ['museum'], ['apartments', 'apartment', 'apts'], ['hotel', 'inn', 'motel', 'suites'],
+].map((g) => new Set(g));
+
 /**
  * Does a geocoder's place name match the place that was spoken? Every
  * distinctive word ("P&L", "Joseph's", "Devonshire") must appear, spelling
  * allowed to vary slightly; generic words ("park", "hospital") don't count.
+ *
+ * opts.areaWords: words of the local town and county names. They aren't
+ * distinctive either ("Spring" in Spring High School is also in Spring
+ * Hospital and Spring Branch), so a name made only of those and generic words
+ * has to match word for word, generic words included.
  */
-function placeMatches(spokenPlace, resultName) {
+function placeMatches(spokenPlace, resultName, opts = {}) {
   const words = (s) => String(s || '').toLowerCase().replace(/'s\b/g, '').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
-  const distinctive = words(spokenPlace).filter((w) => w.length >= 3 && !GENERIC_PLACE_WORDS.has(w));
-  if (distinctive.length === 0) return false; // only generic words: too vague to trust a fuzzy match
+  const area = opts.areaWords || new Set();
   const target = words(resultName);
-  return distinctive.every((w) => target.some((t) => t === w || (w.length >= 5 && jaroWinkler(w, t) >= 0.92)));
+  const found = (w) => target.some((t) => t === w || (w.length >= 5 && jaroWinkler(w, t) >= 0.92));
+  // The kind of place, when the spoken name says it, has to agree ("Lewis
+  // Elementary" is not Lewis Middle School, "Jesse Jones Park" not a library)
+  for (const kind of PLACE_KINDS) {
+    if (words(spokenPlace).some((w) => kind.has(w)) && !target.some((t) => kind.has(t))) return false;
+  }
+  const spoken = words(spokenPlace).filter((w) => w.length >= 3);
+  const distinctive = spoken.filter((w) => !GENERIC_PLACE_WORDS.has(w) && !area.has(w));
+  if (distinctive.length) return distinctive.every(found);
+  // Only town and generic words ("Spring High School"): every one of them, so
+  // a different kind of place in the same town doesn't pass
+  const named = spoken.filter((w) => !['the', 'and'].includes(w));
+  if (!named.some((w) => area.has(w))) return false; // only generic words: too vague to trust a fuzzy match
+  return named.every(found);
 }
 
 /** The street part of an extracted address: "7216 Spring Cypress Rd, Spring, TX" -> "Spring Cypress Rd". */

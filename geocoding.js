@@ -183,6 +183,24 @@ function isTargetCity(city) {
   return TARGET_CITY_SET.has(normalizePlace(city));
 }
 
+// Words of the local town and county names: shared by many places, so they
+// don't tell one named place from another (see streets.placeMatches).
+function areaWords() {
+  const names = [...TARGET_CITIES, GEOCODING_CITY, ...TARGET_COUNTIES.map(normalizeCounty)];
+  return new Set(names.flatMap((n) => normalizePlace(n).split(' ')).filter((w) => w.length >= 3 && w !== 'the'));
+}
+
+// Local towns named in a place's name ("Spring High School" -> Spring), then
+// the default town: where to look again when the place isn't found as spoken.
+function townsForPlace(place) {
+  const words = new Set(normalizePlace(place).split(' '));
+  const named = [...TARGET_CITIES, GEOCODING_CITY].filter((t) => {
+    const tw = normalizePlace(t).split(' ').filter((w) => w !== 'the');
+    return tw.length && tw.every((w) => words.has(w));
+  });
+  return [...new Set([...named, GEOCODING_CITY].filter(Boolean))].slice(0, 2);
+}
+
 /**
  * Per-talkgroup metadata, primarily populated from the imported `talk_groups`
  * SQLite table (the same data the Setup Wizard imports). Maps talkgroup id ->
@@ -797,7 +815,7 @@ function judgeLocationIqResult(result, spokenStreet, houseNumber, spokenPlace) {
       // A named place (school, store, park): the place itself, never a street
       // that shares a word with it ("Lucas Auto Care" is not Lucas Street)
       const placeName = [details.name, result.display_name.split(',')[0]].filter(Boolean).join(' ');
-      ok = !isStreetResult && streets.placeMatches(spokenPlace, placeName);
+      ok = !isStreetResult && streets.placeMatches(spokenPlace, placeName, { areaWords: areaWords() });
     }
     if (!ok) return { ok: false, reason: `different place (${result.display_name.split(',')[0]})` };
   }
@@ -837,6 +855,23 @@ async function geocodeAddressWithLocationIQ(address) {
         await new Promise((r) => setTimeout(r, 500)); // free plan: 2 requests/second
         ({ pick, exactHouse, judged, count } = await bestLocationIqMatch(correctedAddress, corrected.road, houseNumber, viewbox));
         usedQuery = correctedAddress;
+      }
+    }
+
+    // A named place with no town ("Spring High School, TX"): LocationIQ can
+    // return only other places sharing a word with it, so look again in the
+    // town it names, or the default town. The search area still applies.
+    const parts = address.split(',').map((p) => p.trim()).filter(Boolean);
+    if (!pick && !spokenStreet && parts.length <= 2 && !/\s(&|and)\s/i.test(parts[0])) {
+      for (const town of townsForPlace(parts[0])) {
+        const withTown = `${parts[0]}, ${town}, ${GEOCODING_STATE}`;
+        await new Promise((r) => setTimeout(r, 500)); // free plan: 2 requests/second
+        ({ pick, exactHouse, judged, count } = await bestLocationIqMatch(withTown, null, houseNumber, viewbox));
+        usedQuery = withTown;
+        if (pick) {
+          logger.info(`[Geocoding] "${parts[0]}" found after adding the town: "${withTown}"`);
+          break;
+        }
       }
     }
 
