@@ -6,6 +6,7 @@ const winston = require('winston');
 const { getFileTransports } = require('./src/logger');
 const { consoleFormat } = require('./src/consoleFormat');
 const streets = require('./src/geocoding/streets');
+const places = require('./src/geocoding/places');
 const llmQueue = require('./src/ai/llmQueue');
 const moment = require('moment-timezone');
 const fs = require('fs');
@@ -778,8 +779,12 @@ function judgeLocationIqResult(result, spokenStreet, houseNumber, spokenPlace) {
 
   const isAdmin = ['city', 'town', 'village', 'municipality', 'administrative', 'county', 'state', 'postcode'].includes(result.type);
   const isHighway = result.class === 'highway' || result.type === 'intersection';
-  const isPlace = result.class === 'place' && !isAdmin;
-  if (!details.road && !isPlace && !isHighway) return { ok: false, reason: `too vague (${result.type})` };
+  // normalizeaddress=1 leaves out class/type, so a named place with no street
+  // ("Jesse H. Jones Park & Nature Center") also counts when its name says
+  // what kind of place it is; neighborhoods and towns don't
+  const isPlace = (result.class === 'place' && !isAdmin)
+    || (!result.class && !!details.name && streets.placeKindWords(details.name).length > 0);
+  if (!details.road && !isPlace && !isHighway) return { ok: false, reason: `too vague (${result.type || 'no street'})` };
 
   if (!details.county || !isTargetCounty(details.county)) {
     return { ok: false, reason: `outside target counties (${details.county || 'no county'})` };
@@ -815,7 +820,7 @@ function judgeLocationIqResult(result, spokenStreet, houseNumber, spokenPlace) {
       // A named place (school, store, park): the place itself, never a street
       // that shares a word with it ("Lucas Auto Care" is not Lucas Street)
       const placeName = [details.name, result.display_name.split(',')[0]].filter(Boolean).join(' ');
-      ok = !isStreetResult && streets.placeMatches(spokenPlace, placeName, { areaWords: areaWords() });
+      ok = !isStreetResult && streets.placeMatches(spokenPlace, placeName, { areaWords: areaWords(), town: cityName });
     }
     if (!ok) return { ok: false, reason: `different place (${result.display_name.split(',')[0]})` };
   }
@@ -834,6 +839,44 @@ async function bestLocationIqMatch(query, spokenStreet, houseNumber, viewbox) {
   const good = judged.filter((j) => j.ok);
   const pick = good.find((j) => j.exactHouse) || good[0];
   return { pick: pick ? pick.result : null, exactHouse: !!(pick && pick.exactHouse), judged, count: results.length };
+}
+
+/** Load the local place list for the search area (startup, then daily; refetched weekly). */
+async function loadPlaceList() {
+  const box = await getTargetViewbox();
+  return places.load(box, logger);
+}
+
+/**
+ * A place from the local list as a geocode result, after checking with a
+ * LocationIQ reverse lookup that it's in the target counties and towns (the
+ * list covers the search box, which reaches past them).
+ */
+async function placeInTargetArea(place) {
+  await new Promise((r) => setTimeout(r, 500)); // free plan: 2 requests/second
+  const params = new URLSearchParams({ lat: String(place.lat), lon: String(place.lon), key: LOCATIONIQ_API_KEY, format: 'json', addressdetails: '1', normalizeaddress: '1' });
+  try {
+    const res = await fetch(`https://us1.locationiq.com/v1/reverse?${params}`);
+    if (!res.ok) {
+      logger.warn(`[Geocoding] Could not check where "${place.name}" is: LocationIQ ${res.status}`);
+      return null;
+    }
+    const data = await res.json();
+    const details = data.address || {};
+    if (!details.county || !isTargetCounty(details.county)) return null;
+    const cityName = details.city || details.town || details.village || details.hamlet || details.municipality || '';
+    if (TARGET_CITY_SET.size && !isTargetCity(cityName)) return null;
+    const shown = String(data.display_name || '');
+    return {
+      lat: place.lat,
+      lng: place.lon,
+      formatted_address: shown.startsWith(place.name) ? shown : `${place.name}, ${shown}`,
+      county: details.county,
+    };
+  } catch (e) {
+    logger.warn(`[Geocoding] Could not check where "${place.name}" is: ${e.message}`);
+    return null;
+  }
 }
 
 async function geocodeAddressWithLocationIQ(address) {
@@ -871,6 +914,17 @@ async function geocodeAddressWithLocationIQ(address) {
         if (pick) {
           logger.info(`[Geocoding] "${parts[0]}" found after adding the town: "${withTown}"`);
           break;
+        }
+      }
+      // Still not found: the local place list (OpenStreetMap), which also
+      // catches misheard names ("Twin Peaks Middle" -> Twin Creeks Middle School)
+      if (!pick) {
+        const local = places.findPlace(parts[0], { areaWords: areaWords() });
+        if (local) {
+          pick = await placeInTargetArea(local);
+          if (pick) {
+            logger.info(`[Geocoding] "${parts[0]}" ${local.corrected ? `not found; likely "${local.name}" (match ${local.score})` : `found as "${local.name}"`} in the local place list`);
+          }
         }
       }
     }
@@ -1195,6 +1249,7 @@ function reloadSettings(changedKeys = []) {
 module.exports = {
   reloadSettings,
   loadStreetGazetteer,
+  loadPlaceList,
   extractAddress,
   geocodeAddress,
   hyperlinkAddress, // Note: Signature changed slightly if used directly

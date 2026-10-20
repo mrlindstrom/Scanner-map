@@ -1094,13 +1094,17 @@ async function initializeBot() {
     }
 
     // Step 4: Load talkgroups for geocoding
-    const { loadTalkGroups, loadStreetGazetteer } = require('./geocoding');
+    const { loadTalkGroups, loadStreetGazetteer, loadPlaceList } = require('./geocoding');
     const talkGroups = await loadTalkGroups(db);
     Object.assign(TALK_GROUPS, talkGroups);
     logger.info(`Loaded ${Object.keys(TALK_GROUPS).length} talk groups for geocoding`);
     // Local street names for correcting misheard streets; refreshed daily as more calls are geocoded
     await loadStreetGazetteer(db);
     setInterval(() => loadStreetGazetteer(db), 24 * 60 * 60 * 1000);
+    // Local named places for places the geocoder can't find (fetched in the
+    // background; refreshed weekly)
+    loadPlaceList().catch(() => {});
+    setInterval(() => loadPlaceList().catch(() => {}), 24 * 60 * 60 * 1000);
 
     // Step 5: Load API keys
     loadApiKeys();

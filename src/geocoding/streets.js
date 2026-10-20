@@ -149,6 +149,19 @@ const PLACE_KINDS = [
   ['library'], ['museum'], ['apartments', 'apartment', 'apts'], ['hotel', 'inn', 'motel', 'suites'],
 ].map((g) => new Set(g));
 
+const placeWords = (s) => String(s || '').toLowerCase().replace(/'s\b/g, '').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+
+/** The kind words in a place name ("Jesse Jones Park" -> ["park"]). */
+function placeKindWords(name) {
+  return placeWords(name).filter((w) => PLACE_KINDS.some((k) => k.has(w)));
+}
+
+/** Does the result name agree with every kind of place the spoken name says? */
+function kindsAgree(spokenPlace, resultName) {
+  const spoken = placeWords(spokenPlace), target = placeWords(resultName);
+  return PLACE_KINDS.every((kind) => !spoken.some((w) => kind.has(w)) || target.some((t) => kind.has(t)));
+}
+
 /**
  * Does a geocoder's place name match the place that was spoken? Every
  * distinctive word ("P&L", "Joseph's", "Devonshire") must appear, spelling
@@ -157,21 +170,26 @@ const PLACE_KINDS = [
  * opts.areaWords: words of the local town and county names. They aren't
  * distinctive either ("Spring" in Spring High School is also in Spring
  * Hospital and Spring Branch), so a name made only of those and generic words
- * has to match word for word, generic words included.
+ * has to match word for word, generic words included. A town word next to a
+ * distinctive one must still be found, in the name or in opts.town.
  */
 function placeMatches(spokenPlace, resultName, opts = {}) {
-  const words = (s) => String(s || '').toLowerCase().replace(/'s\b/g, '').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+  const words = placeWords;
   const area = opts.areaWords || new Set();
   const target = words(resultName);
   const found = (w) => target.some((t) => t === w || (w.length >= 5 && jaroWinkler(w, t) >= 0.92));
   // The kind of place, when the spoken name says it, has to agree ("Lewis
   // Elementary" is not Lewis Middle School, "Jesse Jones Park" not a library)
-  for (const kind of PLACE_KINDS) {
-    if (words(spokenPlace).some((w) => kind.has(w)) && !target.some((t) => kind.has(t))) return false;
-  }
+  if (!kindsAgree(spokenPlace, resultName)) return false;
   const spoken = words(spokenPlace).filter((w) => w.length >= 3);
   const distinctive = spoken.filter((w) => !GENERIC_PLACE_WORDS.has(w) && !area.has(w));
-  if (distinctive.length) return distinctive.every(found);
+  if (distinctive.length) {
+    // A town word that was spoken still has to be there, in the name or the
+    // result's town ("Klein Oaks High School" is not Grand Oaks High School)
+    const town = words(opts.town || '');
+    const areaOk = spoken.filter((w) => area.has(w)).every((w) => found(w) || town.includes(w));
+    return areaOk && distinctive.every(found);
+  }
   // Only town and generic words ("Spring High School"): every one of them, so
   // a different kind of place in the same town doesn't pass
   const named = spoken.filter((w) => !['the', 'and'].includes(w));
@@ -264,4 +282,4 @@ function mightContainLocation(text) {
   return /\d/.test(t) || LOCATION_SUFFIX.test(t) || LOCATION_PLACE.test(t) || LOCATION_NAMED.test(t) || LOCATION_PHRASE.test(t);
 }
 
-module.exports = { mightContainLocation, placeMatches, wordSimilarity, parseStreet, soundKey, nameSimilarity, roadMatches, isNumberedRoad, streetOf, buildGazetteer, correctStreet };
+module.exports = { mightContainLocation, placeMatches, placeKindWords, kindsAgree, GENERIC_PLACE_WORDS, wordSimilarity, parseStreet, soundKey, nameSimilarity, roadMatches, isNumberedRoad, streetOf, buildGazetteer, correctStreet };
