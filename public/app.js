@@ -1601,6 +1601,26 @@ function updateSelection(items, selectedIndex) {
   });
 }
 
+// Save a call's new map location (and the address picked, if any). Rejects
+// when the server doesn't accept it, so the page never reports a save that
+// didn't happen.
+async function saveMarkerLocation(callId, latLng, address) {
+  const res = await fetch(`/api/markers/${callId}/location`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(authEnabled && currentSessionToken ? { 'Authorization': `Bearer ${currentSessionToken}` } : {})
+    },
+    body: JSON.stringify({ lat: latLng.lat, lon: latLng.lng, ...(address ? { address } : {}) })
+  });
+  let data = null;
+  try { data = await res.json(); } catch (_) { /* not JSON */ }
+  if (!res.ok || !data || !data.success) {
+    throw new Error((data && data.error) || `HTTP ${res.status}`);
+  }
+  return data;
+}
+
 async function startAddressSearch(callId, originalMarker, modal) {
   modal.remove();
 
@@ -1756,8 +1776,17 @@ async function startAddressSearch(callId, originalMarker, modal) {
       console.log('[Address Search] Using LocationIQ Autocomplete');
       autocompleteProvider = 'locationiq';
       
-      // Create scope object to pass variables
-      const scope = { newAddress, newLocation, previewMarker, confirmBtn };
+      // The dropdown sets the picked place through this object, so it must
+      // write to this function's variables (a plain copy would leave Confirm
+      // saving the original location).
+      const scope = {
+        get newAddress() { return newAddress; },
+        set newAddress(v) { newAddress = v; },
+        get newLocation() { return newLocation; },
+        set newLocation(v) { newLocation = v; },
+        previewMarker,
+        confirmBtn,
+      };
       
       // Create LocationIQ autocomplete dropdown
       autocompleteDropdown = createLocationIQDropdown(inputElement, scope);
@@ -1878,15 +1907,7 @@ async function startAddressSearch(callId, originalMarker, modal) {
 
     getOriginalAddress(originalLocation.lat, originalLocation.lng)
       .then(originalAddress => {
-        return fetch(`/api/markers/${callId}/location`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            lat: newLocation.lat,
-            lon: newLocation.lng
-          })
-        })
-        .then(res => res.json())
+        return saveMarkerLocation(callId, newLocation, newAddress)
         .then(() => {
           originalMarker.setLatLng(newLocation);
           markerGroups.addLayer(originalMarker);
@@ -1906,7 +1927,7 @@ async function startAddressSearch(callId, originalMarker, modal) {
       })
       .catch(err => {
         console.error('Update error:', err);
-        showNotification('Error updating marker location', 'error');
+        showNotification(`Error updating marker location: ${err.message}`, 'error');
         markerGroups.addLayer(originalMarker);
       })
       .finally(() => {
@@ -2202,18 +2223,8 @@ function startMarkerRelocation(callId, originalMarker, modal) {
     confirmButton.style.opacity = '0.5';
     confirmButton.disabled = true;
 
-    fetch(`/api/markers/${callId}/location`, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ 
-        lat: newLocation.lat, 
-        lon: newLocation.lng 
-      })
-    })
-    .then(response => response.json())
-    .then(data => {
+    saveMarkerLocation(callId, newLocation)
+    .then(() => {
       // Update original marker position
       originalMarker.setLatLng(newLocation);
       markerGroups.addLayer(originalMarker);
@@ -2232,7 +2243,7 @@ function startMarkerRelocation(callId, originalMarker, modal) {
     })
     .catch(error => {
       console.error('Error updating marker location:', error);
-      showNotification('Error updating marker location', 'error');
+      showNotification(`Error updating marker location: ${error.message}`, 'error');
       markerGroups.addLayer(originalMarker);
     })
     .finally(() => {

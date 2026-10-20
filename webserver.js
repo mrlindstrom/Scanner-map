@@ -1129,7 +1129,7 @@ app.delete('/api/markers/:id', requireAdmin, (req, res) => {
 
 app.put('/api/markers/:id/location', requireAdmin, (req, res) => {
   const markerId = parseInt(req.params.id);
-  const { lat, lon } = req.body;
+  const { lat, lon, address } = req.body;
 
   if (isNaN(markerId) || typeof lat !== 'number' || typeof lon !== 'number') {
     return res.status(400).json({ error: 'Invalid parameters' });
@@ -1137,15 +1137,21 @@ app.put('/api/markers/:id/location', requireAdmin, (req, res) => {
   if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
     return res.status(400).json({ error: 'Coordinates out of range' });
   }
+  // The address picked in the map's address search, when there was one
+  const newAddress = typeof address === 'string' && address.trim() ? address.trim().slice(0, 500) : null;
 
   db.run(
-    'UPDATE transcriptions SET lat = ?, lon = ? WHERE id = ?',
-    [lat, lon, markerId],
+    newAddress
+      ? 'UPDATE transcriptions SET lat = ?, lon = ?, address = ? WHERE id = ?'
+      : 'UPDATE transcriptions SET lat = ?, lon = ? WHERE id = ?',
+    newAddress ? [lat, lon, newAddress, markerId] : [lat, lon, markerId],
     function(err) {
       if (err) {
         console.error('Error updating marker location:', err);
         return res.status(500).json({ error: 'Internal server error' });
       }
+      if (this.changes === 0) return res.status(404).json({ error: 'Call not found' });
+      console.log(`[Webserver] Moved call ${markerId} to ${lat.toFixed(6)}, ${lon.toFixed(6)}${newAddress ? ` (${newAddress})` : ''}`);
       res.json({ success: true });
     }
   );
