@@ -29,11 +29,14 @@ function candidateLine(c, timeLabel) {
   if (c.category && String(c.category).toUpperCase() !== 'OTHER') meta.push(`category: ${c.category}`);
   if (c.tones && c.tones.length) meta.push('dispatch tone');
   if (c.keywords && c.keywords.length) meta.push(`keywords: ${c.keywords.join(', ')}`);
+  const tags = (c.tags || []).filter((t) => t.tier !== 'routine').slice(0, 4);
+  if (tags.length) meta.push(`tags: ${tags.map((t) => `${t.label} (${t.tier})`).join(', ')}`);
+  else if ((c.tags || []).length) meta.push(`tags: ${c.tags[0].label} (routine)`);
   return `[${meta.join(' | ')}] "${stripLinks(c.transcription).slice(0, 300)}"`;
 }
 
 /**
- * @param {object[]} candidates  scored calls (id, timestamp, talk_group, transcription, address, category, tones, keywords)
+ * @param {object[]} candidates  scored calls (id, timestamp, talk_group, transcription, address, category, tones, keywords, tags)
  * @param {object} o  { lookbackHours, startLabel, endLabel, totalCalls, maxIncidents, timeLabel(ts) }
  */
 // The prompt shares Scanner Map's Ollama context (num_ctx 8192 tokens, roughly
@@ -56,6 +59,8 @@ function buildPrompt(candidates, o) {
   return `You are a senior 911 dispatch supervisor reviewing the last ${hours} of radio traffic (${o.startLabel} to ${o.endLabel}) so on-duty staff can see at a glance what actually matters.
 
 The ${lines.length} calls below were pre-filtered from ${o.totalCalls} transmissions. Obvious chatter was removed, but many remaining calls are still routine. Transcripts are automatic speech-to-text of radio audio: expect misheard words, unit numbers and street names. Use only details that appear in the calls; never invent addresses, injuries or outcomes.
+
+Some calls carry tags: call types matched by keyword in the transcript, with the severity that kind of call usually is. Use them as hints for grouping and rating, not as the answer: a tag can come from a misheard word, a question, or a mention of an earlier call, so rate each incident on what its calls actually say.
 
 Steps:
 1. Group calls about the same incident into one incident: same address, the same units, or a dispatch followed by unit updates and outcomes.
@@ -137,7 +142,7 @@ function fallbackIncidents(candidates, maxIncidents) {
   const strong = candidates.filter((c) => c.score >= 8).slice(0, maxIncidents);
   return strong.map((c) => ({
     severity: c.score >= 14 ? 'CRITICAL' : c.score >= 10 ? 'HIGH' : 'MEDIUM',
-    title: (c.reasons.find((r) => !/^(located|category:|keyword:)/.test(r)) || c.category || 'Priority call').slice(0, 80),
+    title: ((c.tags && c.tags[0] && c.tags[0].label) || c.reasons.find((r) => !/^(located|category:|keyword:|routine)/.test(r)) || c.category || 'Priority call').slice(0, 80),
     location: shortAddress(c.address),
     description: stripLinks(c.transcription).slice(0, 300),
     calls: [c],

@@ -5,37 +5,12 @@
  *
  * A busy hour has hundreds of calls, too many to hand an LLM in full, and most
  * are routine radio traffic ("10-4", "en route", "show me clear"). Every call is
- * scored from signals already on hand (tones, keyword matches, map category or
- * the call type named in the text, a located address, and high-priority radio
- * phrases), routine chatter is
- * penalized, and only the top candidates go on to the LLM.
+ * scored from signals already on hand (tones, keyword matches, the call types
+ * its text names (callTypes.js), its map category, a located address), routine
+ * chatter is penalized, and only the top candidates go on to the LLM.
  */
 
-// [pattern, points]. Phrases a dispatcher or unit would use for a serious call.
-const PRIORITY_TERMS = [
-  // Life threat / violence
-  [/\b(shots? fired|shooting|shot (him|her|them|someone)|gunshot|gsw|been shot)\b/i, 10],
-  [/\b(officer down|officer needs (help|assistance)|need (help|backup) now|10-?99|signal 99|mayday)\b/i, 10],
-  [/\b(stabb(ed|ing)|cut (his|her) throat|active (shooter|assailant))\b/i, 9],
-  [/\b(armed|with a (gun|knife|weapon)|weapon|firearm|pistol|rifle|knife)\b/i, 5],
-  [/\b(hostage|barricaded|kidnap(ped|ping)?|abduct(ed|ion)|amber alert)\b/i, 9],
-  [/\b(pursuit|chase|fleeing|evading|bailed out|foot pursuit|took off running)\b/i, 6],
-  [/\b(assault|robbery|carjack(ed|ing)|home invasion|domestic( violence)?|fight in progress)\b/i, 4],
-  // Fire
-  [/\b(working (structure )?fire|fully involved|flames (showing|visible)|smoke showing|heavy smoke)\b/i, 9],
-  [/\b(structure fire|house fire|apartment fire|building fire|commercial fire|second alarm|2nd alarm|third alarm)\b/i, 8],
-  [/\b(explosion|gas leak|hazmat|hazardous materials?|chemical (spill|leak))\b/i, 7],
-  [/\b(vehicle fire|car fire|grass fire|brush fire|fire alarm)\b/i, 2],
-  // Medical / rescue
-  [/\b(cardiac arrest|not breathing|cpr|unresponsive|unconscious|doa|code (blue|black)|full arrest)\b/i, 8],
-  [/\b(overdose|od\b|narcan|seizure|stroke|anaphyla|choking|drowning|hanging|suicid)/i, 6],
-  [/\b(trapped|pinned|entrap(ped|ment)|extrication|ejected|rollover|roll ?over)\b/i, 7],
-  [/\b(major (accident|crash)|multiple (vehicles|injuries|patients)|mass casualty|mci|fatal(ity)?|life flight|med ?flight)\b/i, 8],
-  [/\b(missing (child|person|juvenile|elderly)|lost child|water rescue|swift water)\b/i, 6],
-  [/\b(major|minor) (accident|crash)|\b(accident|crash|collision|mvc|mva) with injur/i, 4],
-  // Urgency markers
-  [/\b(emergency traffic|priority (one|1)|code ?3|all units|any unit|units? respond|expedite|step it up)\b/i, 4],
-];
+const { tagCall } = require('./callTypes');
 
 // Routine traffic. A call that is ONLY this (or very short) is pushed down.
 const ROUTINE_ONLY = /^(\W|\b(10-?4|10-?8|10-?7|10-?6|10-?23|10-?97|copy( that)?|copy,? clear|received|roger|affirm(ative)?|negative|ok(ay)?|thanks?( you)?|clear|go ahead|en ?route|on scene|show me|i'?m|we'?re|be advised|standby|stand by|disregard|thank you|yes( sir| ma'?am)?|no( sir| ma'?am)?|\d+|[a-z]+ \d+)\b)+$/i;
@@ -49,27 +24,6 @@ const CATEGORY_POINTS = [
   [/SERVICE CALL|ASSIST|TRAFFIC HAZARD|VEHICLE STOP|OTHER/, 0],
 ];
 
-// Call types as a dispatcher announces them. Only mapped calls get an AI
-// category (the web server categorizes after geocoding, and categorizing every
-// call would add tens of thousands of Ollama requests a day), so for calls
-// without one the strongest call type named in the text stands in for it,
-// at about the weights of CATEGORY_POINTS. Crashes score lower than the
-// Vehicle Collision category because units mention them long after ("crash
-// report", "the crash earlier"); a serious crash still scores from PRIORITY_TERMS.
-const CALL_TYPE_TERMS = [
-  [/\b(carbon monoxide|co alarm|co detector|odor of gas|smell of gas|gas odor)\b/i, 6],
-  [/\b(chest pains?|breathing (problems?|difficult(y|ies))|difficulty breathing|short(ness)? of breath|altered (mental|level)|passed out|faint(ed|ing)|syncope|injured (person|party)|bleeding|hemorrhag|diabetic|fight|missing (minor|teen|adult|female|male)|runaway)/i, 4],
-  [/\b(disturbance|burglary|burglar alarm|theft|shoplift(er|ing)?|stolen|suspicious (person|vehicle|male|female|activity)|prowler|trespass(er|ing)?|vandalism|criminal mischief|reckless driv(er|ing)|intoxicated|drunk|animal bite|dog bite|welfare (check|concern)|psychiatric|mental health|sick (person|call)|fall victim|fallen|fell|crash|collision|accident|mvc|mva)\b/i, 2],
-];
-
-function callTypePoints(text) {
-  for (const [re, pts] of CALL_TYPE_TERMS) {
-    const m = text.match(re);
-    if (m) return { pts, term: m[0].toLowerCase() };
-  }
-  return null;
-}
-
 function compileExtra(list) {
   return String(list || '')
     .split('|').map((s) => s.trim()).filter(Boolean)
@@ -77,8 +31,9 @@ function compileExtra(list) {
 }
 
 /**
- * Score one call. Returns { score, reasons } where reasons are short labels
- * that are passed to the LLM and logged.
+ * Score one call. Returns { score, reasons, tags }: reasons are short labels
+ * for the log and the fallback summary, tags the call types it names
+ * (callTypes.tagCall, plus any extra priority phrases), passed to the LLM.
  * @param {object} call { transcription, category, address, lat, lon, tones: [string], keywords: [string] }
  */
 function scoreCall(call, opts = {}) {
@@ -89,25 +44,28 @@ function scoreCall(call, opts = {}) {
   if (call.tones && call.tones.length) { score += 8; reasons.push('dispatch tone'); }
   if (call.keywords && call.keywords.length) { score += 5; reasons.push(`keyword: ${call.keywords.join(', ')}`); }
 
-  let termPoints = 0;
-  for (const [re, pts] of PRIORITY_TERMS) {
-    const m = text.match(re);
-    if (m) { termPoints += pts; reasons.push(m[0].toLowerCase()); }
-  }
+  const tags = tagCall(text);
   for (const re of opts.extraPriority || []) {
     const m = text.match(re);
-    if (m) { termPoints += 5; reasons.push(m[0].toLowerCase()); }
+    if (m) tags.push({ label: m[0].toLowerCase(), tier: 'high', points: 5, base: false, match: m[0].toLowerCase() });
   }
+
+  // Types that make a call more serious (a weapon, a pursuit, someone trapped) add up
+  let termPoints = 0;
+  for (const t of tags.filter((x) => !x.base && x.points > 0)) { termPoints += t.points; reasons.push(t.match); }
   score += Math.min(termPoints, 16); // several weak words shouldn't outrank one strong phrase by much
 
+  // The call's main type: the map category or the strongest type named in the
+  // text, whichever says more, and a point for each other type it names
+  // ("fight" and "intoxicated")
+  const baseTags = tags.filter((x) => x.base && x.points > 0).sort((a, b) => b.points - a.points);
   const cat = String(call.category || '').toUpperCase();
-  if (cat) {
-    const hit = CATEGORY_POINTS.find(([re]) => re.test(cat));
-    if (hit && hit[1] > 0) { score += hit[1]; reasons.push(`category: ${call.category}`); }
-  } else {
-    const type = callTypePoints(text);
-    if (type) { score += type.pts; reasons.push(`call type: ${type.term}`); }
-  }
+  const catHit = cat ? CATEGORY_POINTS.find(([re]) => re.test(cat)) : null;
+  const catPoints = catHit ? catHit[1] : 0;
+  const typePoints = baseTags.length ? baseTags[0].points : 0;
+  if (catPoints > 0 && catPoints >= typePoints) { score += catPoints; reasons.push(`category: ${call.category}`); }
+  else if (typePoints > 0) { score += typePoints; reasons.push(`call type: ${baseTags[0].match}`); }
+  score += Math.max(0, Math.min(baseTags.length - 1, 2));
   if (call.lat != null && call.lon != null) { score += 2; reasons.push('located'); }
 
   const words = text.split(/\s+/).filter(Boolean).length;
@@ -119,7 +77,7 @@ function scoreCall(call, opts = {}) {
   // A little credit for substance, capped so long rambling calls don't win
   score += Math.min(words, 40) / 20;
 
-  return { score: Math.round(score * 10) / 10, reasons };
+  return { score: Math.round(score * 10) / 10, reasons, tags: tags.map(({ label, tier }) => ({ label, tier })) };
 }
 
 /**
@@ -132,4 +90,4 @@ function selectCandidates(calls, { max = 50, minScore = 1, extraPriority = [], e
   return { candidates: picked, scored };
 }
 
-module.exports = { scoreCall, selectCandidates, compileExtra, PRIORITY_TERMS, CALL_TYPE_TERMS };
+module.exports = { scoreCall, selectCandidates, compileExtra };
