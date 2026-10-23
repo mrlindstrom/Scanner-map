@@ -138,7 +138,7 @@ Measured on a day of real calls before the change: only 53% of extracted address
 - **The AI triages incidents.** The top candidates go to the AI with a clear severity rubric. It groups related calls into one incident (same address, same units, a dispatch and its follow-ups) and returns only critical, high and medium incidents; routine ones are left out instead of used as padding.
 - **The embed** lists incidents most severe first (🔴 / 🟠 / 🟡), each with the latest status, time, talk group, audio, a link to its Discord message and map, and how many related calls it covers.
 - If the AI is down, the summary shows the highest-scoring calls instead of an error.
-- Uses the same Ollama model and context size as the rest of Scanner Map, so it doesn't make Ollama reload the model. `SUMMARY_MAX_INCIDENTS`, `SUMMARY_MAX_CANDIDATES`, `SUMMARY_MIN_SCORE`, `SUMMARY_EXTRA_PRIORITY_TERMS`, `SUMMARY_EXTRA_BENIGN_TERMS`
+- Uses the same Ollama model and context size (`OLLAMA_NUM_CTX`) as the rest of Scanner Map, so it doesn't make Ollama reload the model. The calls sent to the AI are trimmed to fit that context: about 16,000 characters at the default 8192 tokens, more with a larger one (raise `SUMMARY_MAX_CANDIDATES` too to send more calls). `SUMMARY_MAX_INCIDENTS`, `SUMMARY_MAX_CANDIDATES`, `SUMMARY_MIN_SCORE`, `SUMMARY_EXTRA_PRIORITY_TERMS`, `SUMMARY_EXTRA_BENIGN_TERMS`
 
 ### 📜 Logs
 - **Daily rotation**: a new log file each day, keeping `LOG_RETENTION_DAYS` days (default 3). `LOG_MAX_SIZE` sets an optional per-file size cap.

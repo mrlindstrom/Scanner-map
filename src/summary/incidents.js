@@ -6,6 +6,8 @@
  * Routine incidents are dropped, so the summary shows what actually matters.
  */
 
+const llmQueue = require('../ai/llmQueue');
+
 const SEVERITIES = ['CRITICAL', 'HIGH', 'MEDIUM'];
 const SEVERITY_ICON = { CRITICAL: '🔴', HIGH: '🟠', MEDIUM: '🟡' };
 const SEVERITY_COLOR = { CRITICAL: 0xdc2626, HIGH: 0xf97316, MEDIUM: 0xeab308, NONE: 0x3b82f6 };
@@ -39,9 +41,17 @@ function candidateLine(c, timeLabel) {
  * @param {object[]} candidates  scored calls (id, timestamp, talk_group, transcription, address, category, tones, keywords, tags)
  * @param {object} o  { lookbackHours, startLabel, endLabel, totalCalls, maxIncidents, timeLabel(ts) }
  */
-// The prompt shares Scanner Map's Ollama context (OLLAMA_NUM_CTX, 8192 tokens by default, roughly
-// 4 characters each); keep the calls under this so the reply still fits.
-const MAX_CALL_CHARS = 16000;
+// The prompt shares Scanner Map's Ollama context (OLLAMA_NUM_CTX tokens, roughly
+// 4 characters each). About 4200 tokens go to the instructions and the reply
+// (num_predict 900) with room to spare; the calls get the rest: 16000
+// characters at the default 8192, more with a larger context. A context too
+// small for that still gets about a quarter of it for calls.
+const RESERVED_TOKENS = 4192;
+const CHARS_PER_TOKEN = 4;
+
+function maxCallChars(numCtx = llmQueue.ollamaNumCtx()) {
+  return Math.max(numCtx, (numCtx - RESERVED_TOKENS) * CHARS_PER_TOKEN);
+}
 
 function buildPrompt(candidates, o) {
   const hours = `${o.lookbackHours} ${o.lookbackHours === 1 ? 'hour' : 'hours'}`;
@@ -50,7 +60,7 @@ function buildPrompt(candidates, o) {
   let chars = 0;
   for (const c of [...candidates].sort((a, b) => (b.score || 0) - (a.score || 0))) {
     const line = candidateLine(c, o.timeLabel);
-    if (chars + line.length > (o.maxCallChars || MAX_CALL_CHARS)) break;
+    if (chars + line.length > (o.maxCallChars || maxCallChars())) break;
     kept.push({ c, line });
     chars += line.length + 1;
   }
@@ -161,5 +171,5 @@ function toHighlights(incidents) {
 }
 
 module.exports = {
-  SEVERITIES, SEVERITY_ICON, SEVERITY_COLOR, shortAddress, buildPrompt, parseIncidents, fallbackIncidents, toHighlights, extractJson,
+  SEVERITIES, SEVERITY_ICON, SEVERITY_COLOR, shortAddress, buildPrompt, maxCallChars, parseIncidents, fallbackIncidents, toHighlights, extractJson,
 };
