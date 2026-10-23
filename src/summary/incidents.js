@@ -53,6 +53,18 @@ function maxCallChars(numCtx = llmQueue.ollamaNumCtx()) {
   return Math.max(numCtx, (numCtx - RESERVED_TOKENS) * CHARS_PER_TOKEN);
 }
 
+// How many top-scoring calls to send: SUMMARY_MAX_CANDIDATES when set,
+// otherwise as many as fit the context, 40 at the default 8192 (a call line
+// averages about 400 characters).
+const DEFAULT_CANDIDATES = 40;
+const DEFAULT_CALL_CHARS = 16000;
+
+function maxCandidates(setting, numCtx = llmQueue.ollamaNumCtx()) {
+  const fixed = parseInt(setting, 10);
+  if (fixed > 0) return Math.max(5, fixed);
+  return Math.max(5, Math.round(DEFAULT_CANDIDATES * (maxCallChars(numCtx) / DEFAULT_CALL_CHARS)));
+}
+
 function buildPrompt(candidates, o) {
   const hours = `${o.lookbackHours} ${o.lookbackHours === 1 ? 'hour' : 'hours'}`;
   // Highest score first: drop the weakest candidates if the list is too long
@@ -171,5 +183,5 @@ function toHighlights(incidents) {
 }
 
 module.exports = {
-  SEVERITIES, SEVERITY_ICON, SEVERITY_COLOR, shortAddress, buildPrompt, maxCallChars, parseIncidents, fallbackIncidents, toHighlights, extractJson,
+  SEVERITIES, SEVERITY_ICON, SEVERITY_COLOR, shortAddress, buildPrompt, maxCallChars, maxCandidates, parseIncidents, fallbackIncidents, toHighlights, extractJson,
 };

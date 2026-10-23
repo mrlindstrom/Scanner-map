@@ -181,7 +181,7 @@ add('summary', 'ASK_AI_LOOKBACK_HOURS', 'Ask AI covers (hours)', 'number', '8', 
 add('summary', 'ENABLE_SUMMARY_TALK_GROUPS', 'Only summarize some talkgroups', 'bool', 'false', '', { guided: 'AI Features' });
 add('summary', 'SUMMARY_TALK_GROUPS', 'Summary talkgroups', 'list', '', 'IDs or system:id.', { guided: 'AI Features' });
 add('summary', 'SUMMARY_MAX_INCIDENTS', 'Incidents shown', 'number', '6', '');
-add('summary', 'SUMMARY_MAX_CANDIDATES', 'Calls sent to the AI', 'number', '40', '');
+add('summary', 'SUMMARY_MAX_CANDIDATES', 'Calls sent to the AI', 'number', '', 'Blank = as many as fit the Ollama context size (40 at 8192).');
 add('summary', 'SUMMARY_MIN_SCORE', 'Minimum score', 'number', '2.5', '');
 add('summary', 'SUMMARY_AI_TIMEOUT_SEC', 'AI timeout (s)', 'number', '180', '');
 add('summary', 'SUMMARY_EXTRA_PRIORITY_TERMS', 'Extra priority phrases', 'pipe', '', 'e.g. signal 9|code 30');

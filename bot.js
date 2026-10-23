@@ -5057,7 +5057,7 @@ let SUMMARY_MAX_INCIDENTS, SUMMARY_MAX_CANDIDATES, SUMMARY_MIN_SCORE, SUMMARY_AI
 let SUMMARY_EXTRA_PRIORITY, SUMMARY_EXTRA_BENIGN;
 function loadSummarySettings() {
   SUMMARY_MAX_INCIDENTS = Math.max(1, parseInt(process.env.SUMMARY_MAX_INCIDENTS, 10) || 6);
-  SUMMARY_MAX_CANDIDATES = Math.max(5, parseInt(process.env.SUMMARY_MAX_CANDIDATES, 10) || 40);
+  SUMMARY_MAX_CANDIDATES = process.env.SUMMARY_MAX_CANDIDATES; // blank: scales with OLLAMA_NUM_CTX
   SUMMARY_MIN_SCORE = Number.isFinite(parseFloat(process.env.SUMMARY_MIN_SCORE)) ? parseFloat(process.env.SUMMARY_MIN_SCORE) : 2.5;
   SUMMARY_AI_TIMEOUT_MS = (parseFloat(process.env.SUMMARY_AI_TIMEOUT_SEC) || 180) * 1000;
   SUMMARY_EXTRA_PRIORITY = summaryTriage.compileExtra(process.env.SUMMARY_EXTRA_PRIORITY_TERMS);
@@ -5139,7 +5139,7 @@ async function generateSummary(transcriptions) {
   });
 
   const { candidates } = summaryTriage.selectCandidates(calls, {
-    max: SUMMARY_MAX_CANDIDATES,
+    max: summaryIncidents.maxCandidates(SUMMARY_MAX_CANDIDATES),
     minScore: SUMMARY_MIN_SCORE,
     extraPriority: SUMMARY_EXTRA_PRIORITY,
     extraBenign: SUMMARY_EXTRA_BENIGN,
