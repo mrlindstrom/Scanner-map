@@ -446,7 +446,7 @@ Category:`;
             stream: false,
             options: {
                 temperature: 0.3,
-				num_ctx: 8192
+				num_ctx: llmQueue.ollamaNumCtx()
             }
           }),
         }, queueOpts);

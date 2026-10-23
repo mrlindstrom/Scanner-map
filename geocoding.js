@@ -423,7 +423,7 @@ async function callLLM(prompt, opts = {}) {
           prompt,
           stream: false,
           think: false,
-          options: { temperature: 0, top_p: 0.1, num_predict: maxTokens, num_ctx: 8192 },
+          options: { temperature: 0, top_p: 0.1, num_predict: maxTokens, num_ctx: llmQueue.ollamaNumCtx() },
         }),
       }, queueOpts);
       if (!response.ok) throw new Error(`Ollama API error! status: ${response.status}`);
@@ -598,7 +598,7 @@ Transcript (from ${town}):
             // Deterministic, low-creativity decoding for reliable extraction.
             // Without this, Ollama uses the model default (~0.8) and the same
             // transcript intermittently yields "No address found".
-            options: { temperature: 0, top_p: 0.1, num_predict: 800, num_ctx: 8192 }
+            options: { temperature: 0, top_p: 0.1, num_predict: 800, num_ctx: llmQueue.ollamaNumCtx() }
           }),
         }, queueOpts);
 

@@ -27,6 +27,7 @@ const path = require('path');
 const fetch = require('node-fetch');
 
 const PRIORITY = { high: 0, normal: 1, low: 2 };
+const DEFAULT_OLLAMA_NUM_CTX = 8192;
 const FIRST_BACKOFF_MS = 5000;
 // Timeouts / server errors in a row before pausing. A refused connection pauses at once.
 const FAILURES_BEFORE_BACKOFF = 3;
@@ -352,8 +353,15 @@ function recordSuccess() {
   lastError = '';
 }
 
+// Ollama context size (OLLAMA_NUM_CTX) for every request: all of them must use
+// the same value, or Ollama reloads the model each time it changes.
+function ollamaNumCtx() {
+  const n = parseInt(process.env.OLLAMA_NUM_CTX, 10);
+  return n > 0 ? n : DEFAULT_OLLAMA_NUM_CTX;
+}
+
 watchPauseFile();
 
 module.exports = {
-  request, isAvailable, status, reset, setLogger, setManualPause, isPausedByHand, LlmUnavailableError,
+  request, isAvailable, status, reset, setLogger, setManualPause, isPausedByHand, ollamaNumCtx, LlmUnavailableError,
 };

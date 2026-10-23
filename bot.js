@@ -5070,7 +5070,7 @@ function summaryTimeLabel(ts) {
 }
 
 // One JSON completion from the configured provider. Ollama uses the same model
-// and num_ctx as Scanner Map's other requests, so the loaded model is reused
+// and num_ctx (OLLAMA_NUM_CTX) as Scanner Map's other requests, so the loaded model is reused
 // rather than reloaded.
 async function summaryAiCompletion(prompt) {
   // Lowest priority in the shared AI queue: live address extraction goes first.
@@ -5102,7 +5102,7 @@ async function summaryAiCompletion(prompt) {
         format: 'json',
         // num_ctx must match Scanner Map's other Ollama requests or the model reloads.
         // Ollama serves one request at a time, so cap the reply to keep address extraction from waiting long.
-        options: { num_ctx: 8192, temperature: 0.2, num_predict: 900 },
+        options: { num_ctx: llmQueue.ollamaNumCtx(), temperature: 0.2, num_predict: 900 },
       }),
     }, queueOpts);
     if (!response.ok) throw new Error(`Ollama API error ${response.status}`);
@@ -6402,7 +6402,7 @@ User Question: ${userQuestion}
                       model: OLLAMA_MODEL,
                       prompt: commonPrompt,
                       stream: false,
-                      options: { num_ctx: 8192 }
+                      options: { num_ctx: llmQueue.ollamaNumCtx() }
                     }),
                 }, queueOpts);
                 if (!response.ok) {

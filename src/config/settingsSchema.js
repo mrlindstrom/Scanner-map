@@ -38,7 +38,7 @@ const WEB_KEYS = new Set([
   'AI_PROVIDER', 'ENABLE_AUTH', 'GOOGLE_MAPS_API_KEY', 'LOCAL_AUDIO_DIR', 'LOCATIONIQ_API_KEY',
   'LOG_CONSOLE_VERBOSE', 'LOG_LEVEL', 'MAP_CENTER_LAT', 'MAP_CENTER_LON', 'MAP_DEFAULT_ZOOM',
   'AI_BACKOFF_MAX_SEC', 'AI_MAX_CONCURRENT', 'AI_QUEUE_MAX', 'AI_QUEUE_WAIT_SEC',
-  'MAX_SESSIONS_PER_USER', 'OLLAMA_MODEL', 'OLLAMA_URL', 'OPENAI_API_KEY', 'OPENAI_MODEL',
+  'MAX_SESSIONS_PER_USER', 'OLLAMA_MODEL', 'OLLAMA_NUM_CTX', 'OLLAMA_URL', 'OPENAI_API_KEY', 'OPENAI_MODEL',
   'PROTECT_AUDIO', 'PUBLIC_DOMAIN', 'S3_ACCESS_KEY_ID', 'S3_BUCKET_NAME', 'S3_ENDPOINT',
   'S3_FORCE_PATH_STYLE', 'S3_PUBLIC_BASE_URL', 'S3_REGION', 'S3_SECRET_ACCESS_KEY',
   'SESSION_DURATION_DAYS', 'SESSION_SECRET', 'STORAGE_FALLBACK_DIR', 'STORAGE_FALLBACK_MAX_MB', 'STORAGE_MODE',
@@ -114,6 +114,7 @@ add('location', 'AI_EXTRACT_TIMEOUT_MS', 'AI timeout (ms)', 'number', '30000', '
 add('ai', 'AI_PROVIDER', 'AI provider', 'select', 'ollama', 'Used for addresses, summaries and Ask AI.', { options: ['ollama', 'openai'], guided: 'AI Features' });
 add('ai', 'OLLAMA_URL', 'Ollama URL', 'text', 'http://localhost:11434', '', { guided: 'AI Features' });
 add('ai', 'OLLAMA_MODEL', 'Ollama model', 'text', 'llama3.1:8b', '', { guided: 'AI Features' });
+add('ai', 'OLLAMA_NUM_CTX', 'Ollama context size (tokens)', 'number', '8192', 'num_ctx for every Ollama request. Larger fits longer prompts but uses more GPU memory.');
 add('ai', 'OPENAI_API_KEY', 'OpenAI API key', 'secret', '', 'Also used by OpenAI transcription.', { guided: 'AI Features' });
 add('ai', 'OPENAI_MODEL', 'OpenAI model', 'text', 'gpt-4o-mini', '', { guided: 'AI Features' });
 add('ai', 'AI_MAX_CONCURRENT', 'AI requests at once', 'number', '', 'Blank = 1 for Ollama (it answers one at a time), 4 for OpenAI.');

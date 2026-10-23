@@ -39,7 +39,7 @@ function candidateLine(c, timeLabel) {
  * @param {object[]} candidates  scored calls (id, timestamp, talk_group, transcription, address, category, tones, keywords, tags)
  * @param {object} o  { lookbackHours, startLabel, endLabel, totalCalls, maxIncidents, timeLabel(ts) }
  */
-// The prompt shares Scanner Map's Ollama context (num_ctx 8192 tokens, roughly
+// The prompt shares Scanner Map's Ollama context (OLLAMA_NUM_CTX, 8192 tokens by default, roughly
 // 4 characters each); keep the calls under this so the reply still fits.
 const MAX_CALL_CHARS = 16000;
 
