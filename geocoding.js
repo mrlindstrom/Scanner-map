@@ -388,7 +388,7 @@ function addressAnchoredInTranscript(address, transcript) {
 async function callLLM(prompt, opts = {}) {
   const maxTokens = opts.maxTokens || 800;
   const timeoutMs = opts.timeoutMs || (parseInt(process.env.AI_EXTRACT_TIMEOUT_MS, 10) || 30000);
-  const queueOpts = { label: 'Address check', timeoutMs };
+  const queueOpts = { label: 'Address check', timeoutMs, priority: opts.priority };
   try {
     let text = '';
     if (AI_PROVIDER.toLowerCase() === 'openai') {
@@ -440,7 +440,8 @@ async function callLLM(prompt, opts = {}) {
     if (error.name === 'AbortError') {
       logger.error(`[Geocoding] AI request timed out: ${error.message}`);
     } else if (error.name === 'LlmUnavailableError') {
-      logger.warn(`[Geocoding] ${error.message}`);
+      // Not an answer: the caller retries the call when the AI is back
+      throw error;
     } else {
       logger.error(`[Geocoding] AI request failed: ${error.message}`);
     }
@@ -457,7 +458,7 @@ async function callLLM(prompt, opts = {}) {
  * @param {string} transcript - The original transcript.
  * @returns {Promise<boolean>} - true if the address should be kept.
  */
-async function verifyAddressWithLLM(address, transcript) {
+async function verifyAddressWithLLM(address, transcript, opts = {}) {
   if (String(process.env.AI_VERIFY_ADDRESS || 'true').toLowerCase() === 'false') return true;
 
   // Verify only the street/place part. The trailing city/state was likely
@@ -483,7 +484,7 @@ Answer YES if the transcript mentions this street, intersection, or named place 
 
 Respond with exactly one word: YES or NO.`;
 
-  const answer = await callLLM(prompt, { maxTokens: 200 });
+  const answer = await callLLM(prompt, { maxTokens: 200, priority: opts.priority });
   if (answer === null) {
     logger.warn(`[Geocoding] Address verification unavailable (AI error/timeout); keeping "${address}".`);
     return true; // fail open
@@ -504,7 +505,7 @@ Respond with exactly one word: YES or NO.`;
  * @param {string} town - The town associated with the transcript.
  * @returns {Promise<string|null>} - The extracted and completed address or null if not found.
  */
-async function extractAddressWithLLM(transcript, town) {
+async function extractAddressWithLLM(transcript, town, opts = {}) {
   try {
     const countiesString = TARGET_COUNTIES.join(', ');
     const commonPrompt = `You extract the incident LOCATION from a first-responder dispatch transcript.
@@ -546,7 +547,7 @@ Transcript (from ${town}):
 
     // Sent through the shared AI queue, which also times the request out
     const AI_TIMEOUT_MS = parseInt(process.env.AI_EXTRACT_TIMEOUT_MS, 10) || 30000;
-    const queueOpts = { label: 'Address extraction', timeoutMs: AI_TIMEOUT_MS };
+    const queueOpts = { label: 'Address extraction', timeoutMs: AI_TIMEOUT_MS, priority: opts.priority };
 
     let extractedAddress = '';
 
@@ -649,10 +650,7 @@ Transcript (from ${town}):
          logger.error(`[Geocoding] AI request timed out during address extraction: ${error.message}`);
          return null; // Return null on timeout
     }
-    if (error.name === 'LlmUnavailableError') {
-      logger.warn(`[Geocoding] ${error.message}`);
-      return null;
-    }
+    if (error.name === 'LlmUnavailableError') throw error; // not an answer; retried when the AI is back
     logger.error(`Error extracting address with LLM: ${error.message}`);
     return null;
   }
@@ -1082,7 +1080,13 @@ function hyperlinkAddress(transcript, address, lat, lng) {
  * @param {string} [systemName] - Radio system label (disambiguates overlapping ids).
  * @returns {Promise<string|null>} - Extracted and completed addresses or null if none are found.
  */
-async function extractAddress(transcript, talkGroupId, systemName) {
+/**
+ * The address a transcript names, or null.
+ * @param {object} [opts] { priority } for the AI queue ('low' for catching up)
+ * @throws {LlmUnavailableError} when the AI is paused or not answering, so the
+ *   call can be looked up again later rather than saved as "no address"
+ */
+async function extractAddress(transcript, talkGroupId, systemName, opts = {}) {
   // Pull per-talkgroup context (county from the imported talk_groups table),
   // preferring the system-scoped entry so overlapping ids resolve correctly.
   const sysKey = String(systemName || '').trim().toLowerCase();
@@ -1106,7 +1110,7 @@ async function extractAddress(transcript, talkGroupId, systemName) {
 
   const transcriptForLLM = stripDispatchTimes(transcript);
   if (transcriptForLLM !== transcript) logger.info(`[Geocoding] Removed the dispatch time before extraction: "${transcriptForLLM.slice(0, 200)}"`);
-  let extractedAddress = await extractAddressWithLLM(transcriptForLLM, townForLLMPrompt);
+  let extractedAddress = await extractAddressWithLLM(transcriptForLLM, townForLLMPrompt, opts);
 
   if (!extractedAddress) {
     return null;
@@ -1161,7 +1165,7 @@ async function extractAddress(transcript, talkGroupId, systemName) {
   const hasHouseNumberAndStreet = /^\s*\d+[a-z]?\s+\S/i.test(addressCorePart(extractedAddress))
     && !/\s(&|and)\s/i.test(addressCorePart(extractedAddress));
   if (!hasHouseNumberAndStreet) {
-    const verified = await verifyAddressWithLLM(extractedAddress, transcript);
+    const verified = await verifyAddressWithLLM(extractedAddress, transcript, opts);
     if (!verified) {
       return null;
     }
@@ -1195,7 +1199,14 @@ async function processTranscriptAndLink(transcript, talkGroupId) {
     }
   }
 
-  const extractedAddress = await extractAddress(transcript, talkGroupId);
+  let extractedAddress;
+  try {
+    extractedAddress = await extractAddress(transcript, talkGroupId);
+  } catch (error) {
+    if (error.name !== 'LlmUnavailableError') throw error;
+    logger.warn(`[Geocoding] ${error.message}`);
+    return null;
+  }
 
   if (!extractedAddress) {
     logger.info('No valid address extracted from transcript.');

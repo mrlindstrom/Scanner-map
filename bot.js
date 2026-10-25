@@ -129,6 +129,7 @@ const { createStorage, isDbMode, buildKey } = require('./src/storage');
 const pendingUploads = require('./src/storage/pendingUploads');
 const { runMigrations } = require('./src/db/migrations');
 const llmQueue = require('./src/ai/llmQueue');
+const { createCatchUp } = require('./src/ai/catchUp');
 const { audioUrl: buildAudioUrl, getPublicBaseUrl } = require('./src/utils/publicUrl');
 const callEmbeds = require('./src/discord/callEmbeds');
 const summaryTriage = require('./src/summary/triage');
@@ -284,19 +285,24 @@ function addToTwoToneQueue(callInfo) {
   }
 }
 
+// Mapped talk groups (if enabled). Entries may be a plain id (matches that id
+// on any system) or a system-scoped "system:id" pair, so overlapping ids
+// across systems can be mapped independently.
+function isMappedTalkGroup(talkGroupID, systemName) {
+  if (!IS_MAPPED_TALK_GROUPS_ENABLED) return false;
+  const sysKey = normalizeSystemLabel(systemName);
+  const scoped = sysKey ? `${sysKey}:${talkGroupID}` : null;
+  return MAPPED_TALK_GROUPS.includes(String(talkGroupID)) || !!(scoped && MAPPED_TALK_GROUPS.includes(scoped));
+}
+
 function shouldCheckForAddress(talkGroupID, transcriptionId, systemName) {
   let shouldCheck = false;
-  
-  // Check 1: Traditional mapped talk groups (if enabled). Entries may be a plain
-  // id (matches that id on any system) or a system-scoped "system:id" pair, so
-  // overlapping ids across systems can be mapped independently.
-  if (IS_MAPPED_TALK_GROUPS_ENABLED) {
+
+  // Check 1: Traditional mapped talk groups
+  if (isMappedTalkGroup(talkGroupID, systemName)) {
+    shouldCheck = true;
     const sysKey = normalizeSystemLabel(systemName);
-    const scoped = sysKey ? `${sysKey}:${talkGroupID}` : null;
-    if (MAPPED_TALK_GROUPS.includes(String(talkGroupID)) || (scoped && MAPPED_TALK_GROUPS.includes(scoped))) {
-      shouldCheck = true;
-      logger.info(`Address check: Talk group ${talkGroupID}${sysKey ? ` (system ${sysKey})` : ''} is in mapped talk groups`);
-    }
+    logger.info(`Address check: Talk group ${talkGroupID}${sysKey ? ` (system ${sysKey})` : ''} is in mapped talk groups`);
   }
   
   // Check 2: Two-tone queue (if two-tone mode is enabled)
@@ -1105,6 +1111,8 @@ async function initializeBot() {
     // background; refreshed weekly)
     loadPlaceList().catch(() => {});
     setInterval(() => loadPlaceList().catch(() => {}), 24 * 60 * 60 * 1000);
+    // Missed calls still to look up from before a restart (src/ai/catchUp.js)
+    setTimeout(() => aiCatchUp.run(), 30000);
 
     // Step 5: Load API keys
     loadApiKeys();
@@ -4289,7 +4297,10 @@ async function analyzeCall(id, transcriptionText, talkGroupID, talkGroupName, sy
   const locationPossible = !ADDRESS_PREFILTER_ENABLED || streetMatching.mightContainLocation(transcriptionText);
   let lateLocation = null;
   if (transcriptionText.length >= 15 && locationPossible && shouldCheckForAddress(talkGroupID, id, systemName)) {
-    if (llmQueue.isAvailable()) {
+    if (llmQueue.isPausedByHand()) {
+      // Nothing is sent while paused; the call is looked up when the AI is resumed (aiCatchUp)
+      logger.info(`AI is paused; posting call ${id} now and looking up its location when the AI is resumed`);
+    } else if (llmQueue.isAvailable()) {
       await extractAndProcessAddress(id, transcriptionText, talkGroupID, systemName);
     } else {
       // The AI isn't answering: post the call now instead of holding it, and
@@ -4472,25 +4483,29 @@ async function handleNewTranscription(
 // follow-up doesn't queue a second lookup for the same call.
 const addressLookupsInFlight = new Set();
 
-async function extractAndProcessAddress(id, transcriptionText, talkGroupID, systemName) {
+// Resolves 'found', 'none', 'unavailable' (the AI was paused or not answering:
+// nothing is saved, and the catch-up looks the call up again) or 'busy'.
+// opts.priority goes to the AI queue ('low' for catching up).
+async function extractAndProcessAddress(id, transcriptionText, talkGroupID, systemName, opts = {}) {
   const key = String(id);
   if (addressLookupsInFlight.has(key)) {
     logger.info(`Address extraction for ID ${id} is already in progress`);
-    return;
+    return 'busy';
   }
   addressLookupsInFlight.add(key);
   try {
-    await extractAndProcessAddressNow(id, transcriptionText, talkGroupID, systemName);
+    return await extractAndProcessAddressNow(id, transcriptionText, talkGroupID, systemName, opts);
   } finally {
     addressLookupsInFlight.delete(key);
   }
 }
 
-async function extractAndProcessAddressNow(id, transcriptionText, talkGroupID, systemName) {
+async function extractAndProcessAddressNow(id, transcriptionText, talkGroupID, systemName, opts = {}) {
   logger.info(`Starting address extraction for ID ${id}`);
-  
+  let outcome = 'none';
+
   try {
-    const extractedAddress = await extractAddress(transcriptionText, talkGroupID, systemName);
+    const extractedAddress = await extractAddress(transcriptionText, talkGroupID, systemName, opts);
 
     if (extractedAddress) {
       logger.info(`Extracted Address for ID ${id}: ${extractedAddress}`);
@@ -4509,6 +4524,7 @@ async function extractAndProcessAddressNow(id, transcriptionText, talkGroupID, s
           geocodeResult.lng
         );
         await updateTranscriptionWithLinkedText(id, linkedTranscriptionText);
+        outcome = 'found';
       } else {
         logger.info(`Failed to geocode address for ID ${id}: ${extractedAddress}`);
         await updateDatabaseWithNullCoordinates(id);
@@ -4518,6 +4534,10 @@ async function extractAndProcessAddressNow(id, transcriptionText, talkGroupID, s
       await updateDatabaseWithNullCoordinates(id);
     }
   } catch (error) {
+    if (error.name === 'LlmUnavailableError') {
+      logger.warn(`Address extraction for ID ${id} is waiting for the AI (${error.message}); it's looked up again when the AI is back`);
+      return 'unavailable';
+    }
     logger.error(`Error in address extraction for ID ${id}: ${error.message}`, {
       stack: error.stack,
       transcriptionTextLength: transcriptionText.length,
@@ -4527,6 +4547,38 @@ async function extractAndProcessAddressNow(id, transcriptionText, talkGroupID, s
   }
 
   logger.info(`Finished address extraction and processing for ID ${id}`);
+  return outcome;
+}
+
+// Calls missed while the AI was paused or down are looked up when it's back,
+// oldest first and behind live calls (src/ai/catchUp.js). The same rules as a
+// live call decide which ones need it; calls picked only by two-tone mode
+// can't be told apart afterwards, so they're left out.
+function callNeedsAddressLookup(row) {
+  const text = String(row.transcription || '');
+  return row.lat == null && text.length >= 15
+    && (!ADDRESS_PREFILTER_ENABLED || streetMatching.mightContainLocation(text))
+    && isMappedTalkGroup(row.talk_group_id, row.system);
+}
+
+const aiCatchUp = createCatchUp({
+  db: { all: (...a) => db.all(...a), get: (...a) => db.get(...a) },
+  logger,
+  needsLookup: callNeedsAddressLookup,
+  isReady: () => llmQueue.isAvailable(),
+  lookup: async (row) => {
+    const outcome = await extractAndProcessAddress(row.id, row.transcription, String(row.talk_group_id), row.system, { priority: 'low' });
+    if (outcome === 'found') addLocationToPostedCall(row.id);
+    return outcome === 'unavailable' ? 'unavailable' : 'done';
+  },
+});
+llmQueue.onResume((info) => aiCatchUp.enqueue(info));
+
+// Add a caught-up location to the call's Discord message, if it's still known
+function addLocationToPostedCall(id) {
+  const state = callMessageStates.get(String(id));
+  const entry = state && state.entries && state.entries.find((e) => String(e.id) === String(id));
+  if (entry) addLateLocation(entry).catch(() => {});
 }
 
 async function updateDatabaseWithCoordinates(id, geocodeResult) {
@@ -6476,7 +6528,7 @@ function discordGuild() {
 // The AI queue's state, for the Pause AI button in Settings.
 app.get('/internal/ai/status', (req, res) => {
   if (!isLoopback(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
-  res.json({ ok: true, status: llmQueue.status() });
+  res.json({ ok: true, status: { ...llmQueue.status(), catchUp: aiCatchUp.status() } });
 });
 
 // List the bot's text channels and categories so the UI can filter/sort and

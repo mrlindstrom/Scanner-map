@@ -1000,6 +1000,7 @@ function initializeSocketIO() {
 
     // Listener for map updates (Keep as is)
     socket.on('newCall', handleNewCall);
+    socket.on('lateCall', handleLateCall);
     
     // Restore direct Listener for live feed updates
     socket.on('liveFeedUpdate', handleLiveFeedUpdate); 
@@ -1024,6 +1025,16 @@ function handleReconnect() {
 }
 
 // Handle New Call Event
+// A call that got its location or category after the fact (the AI was paused
+// or down): added like one loaded with the map, without the new-call banner,
+// sound or tracking.
+function handleLateCall(call) {
+    if (markers[call.id] || !isValidCall(call)) return;
+    const since = Date.now() - timeRangeHours * 60 * 60 * 1000;
+    if (call.timestamp * 1000 < since) return;
+    addMarker(call, false);
+}
+
 function handleNewCall(call) {
     console.log('Received newCall event:', call);
 

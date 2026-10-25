@@ -2188,7 +2188,9 @@
       btn.classList.toggle('btn-primary', paused);
       box.classList.toggle('paused', paused);
       const bot = d.bot || {};
-      const waiting = bot.waiting ? ` · ${bot.waiting} waiting` : '';
+      const cu = bot.catchUp;
+      const waiting = (bot.waiting ? ` · ${bot.waiting} waiting` : '')
+        + (cu ? ` · ${cu.running ? 'catching up on' : 'to catch up on'} missed calls: ${cu.done.toLocaleString()} of ${cu.total.toLocaleString()}` : '');
       if (paused) {
         const since = d.pausedSince ? new Date(d.pausedSince) : null;
         const when = since && !isNaN(since)
@@ -2221,7 +2223,7 @@
         if (!r.ok || !r.data || !r.data.ok) throw new Error((r.data && r.data.error) || `HTTP ${r.status}`);
         toast(want
           ? 'AI paused. Nothing is sent to the AI until you resume it.'
-          : 'AI resumed. Waiting requests are being sent.', 'ok');
+          : 'AI resumed. Calls from while it was paused are being looked up, oldest first.', 'ok');
         busy = false;
         show(r.data);
       } catch (e) {

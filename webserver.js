@@ -479,8 +479,10 @@ Category:`;
 
   } catch (error) {
     if (error.name === 'LlmUnavailableError') {
+      // No answer, so no category: the call stays uncategorized and the
+      // catch-up below categorizes it when the AI is back
       console.warn(`[Webserver] ${error.message}`);
-      return 'OTHER';
+      return null;
     }
     console.error(`[Webserver] Error categorizing call: "${transcript}". Error: ${error.message}`);
     if (error.name === 'AbortError') {
@@ -1489,6 +1491,47 @@ function checkForLiveFeedCalls() {
 initializeLastCallId();
 initializeLastLiveFeedCallId();
 setInterval(checkForNewCalls, 2000); // Poll for map updates every 2s
+
+// Mapped calls without a category: ones the AI couldn't categorize (paused or
+// not answering) and ones that got their location late, after the map poller
+// above had passed them (looked up again when the AI was back). A few at a
+// time while the AI is answering; they're added to open maps quietly
+// ('lateCall': no banner, sound or tracking).
+let categoryCatchUpBusy = false;
+function categorizeMissedCalls() {
+  if (categoryCatchUpBusy || !llmQueue.isAvailable()) return;
+  categoryCatchUpBusy = true;
+  db.all(
+    `SELECT t.*, ${tgResolved('alpha_tag')} AS talk_group_name, ${tgResolved('tag')} AS talk_group_tag
+     FROM transcriptions t
+     WHERE t.id <= ? AND t.category IS NULL AND t.lat IS NOT NULL AND t.lon IS NOT NULL
+       AND t.transcription IS NOT NULL AND t.transcription != ''
+     ORDER BY t.id ASC
+     LIMIT 5`,
+    [lastCallId],
+    async (err, rows) => {
+      try {
+        if (err) {
+          console.error('Error checking for uncategorized map calls:', err.message);
+          return;
+        }
+        for (const row of rows || []) {
+          if (!llmQueue.isAvailable()) break;
+          const category = await generateShortSummary(row.transcription);
+          if (!category) break; // the AI stopped answering; try again later
+          await new Promise((resolve) => {
+            db.run('UPDATE transcriptions SET category = ? WHERE id = ? AND category IS NULL', [category, row.id], () => resolve());
+          });
+          console.log(`Categorized missed map call ID ${row.id}: "${category}"`);
+          io.emit('lateCall', { ...row, category });
+        }
+      } finally {
+        categoryCatchUpBusy = false;
+      }
+    }
+  );
+}
+setInterval(categorizeMissedCalls, 15000);
 setInterval(checkForLiveFeedCalls, 2500); // Poll for live feed slightly offset, every 2.5s
 
 // --- End Polling Logic ---

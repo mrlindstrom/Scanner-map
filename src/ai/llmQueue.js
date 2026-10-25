@@ -18,6 +18,8 @@
  *   Ollama down). Nothing is sent until it's resumed; requests wait as above.
  *   The pause is kept in data/ai-paused.json so the bot and web server
  *   processes share it and it survives a restart.
+ * - onResume(fn) is told when the AI is back after a pause or an outage, and
+ *   from when requests may have been missed, so callers can catch up.
  *
  * Settings are read on every request, so changes apply right away.
  */
@@ -51,7 +53,9 @@ let backoffMs = 0; // > 0 while the provider is considered down
 let pausedUntil = 0;
 let pauseTimer = null;
 let lastError = '';
+let outageSince = 0; // when the current outage began
 const dropped = { full: 0, expired: 0 };
+const resumeListeners = [];
 let dropLogTimer = null;
 
 // ---- Manual pause (shared between processes through a file) ----
@@ -85,15 +89,40 @@ function checkPauseFile() {
   if (st === pauseStamp) return;
   pauseStamp = st;
   const next = readPauseFile();
-  const was = !!manual;
+  const prev = manual;
   manual = next;
-  if (was === !!next) return;
+  if (!!prev === !!next) return;
   if (next) {
     log.warn(`[AI] Paused by an admin; holding AI requests until it's resumed (${queue.length} waiting).`);
   } else {
     log.info(`[AI] Resumed by an admin; sending the ${queue.length} waiting request(s).`);
     reset();
+    const pausedAt = Date.parse(prev.since);
+    notifyResume('pause', Number.isFinite(pausedAt) ? pausedAt : Date.now());
   }
+}
+
+/**
+ * Call fn({ reason, since }) when the AI is back: reason 'pause' (resumed by
+ * hand) or 'outage' (answering again), since the time in ms from which AI
+ * requests may have been missed. Requests already waiting when it stopped
+ * could give up too, so since is that long (AI_QUEUE_WAIT_SEC) earlier.
+ */
+function onResume(fn) {
+  resumeListeners.push(fn);
+}
+
+function notifyResume(reason, stoppedAt) {
+  const since = stoppedAt - settings().waitMs;
+  setImmediate(() => {
+    for (const fn of resumeListeners) {
+      try {
+        fn({ reason, since });
+      } catch (e) {
+        log.error(`[AI] Resume listener failed: ${e.stack || e.message}`);
+      }
+    }
+  });
 }
 
 function watchPauseFile() {
@@ -339,6 +368,7 @@ function recordFailure({ reason, immediate }) {
   if (pausedUntil > Date.now()) return;
   if (backoffMs === 0 && !immediate && failures < FAILURES_BEFORE_BACKOFF) return;
   const { backoffMaxMs } = settings();
+  if (!backoffMs) outageSince = Date.now();
   backoffMs = backoffMs ? Math.min(backoffMs * 2, backoffMaxMs) : Math.min(FIRST_BACKOFF_MS, backoffMaxMs);
   const wait = Math.round(Math.min(backoffMaxMs, backoffMs * (0.85 + Math.random() * 0.3))); // jitter
   pausedUntil = Date.now() + wait;
@@ -346,7 +376,11 @@ function recordFailure({ reason, immediate }) {
 }
 
 function recordSuccess() {
-  if (backoffMs > 0) log.info(`[AI] Answering again; sending the ${queue.length} waiting request(s).`);
+  if (backoffMs > 0) {
+    log.info(`[AI] Answering again; sending the ${queue.length} waiting request(s).`);
+    // Requests wait out a short outage in the queue; only a longer one loses any
+    if (!manual && outageSince && Date.now() - outageSince > settings().waitMs) notifyResume('outage', outageSince);
+  }
   failures = 0;
   backoffMs = 0;
   pausedUntil = 0;
@@ -363,5 +397,5 @@ function ollamaNumCtx() {
 watchPauseFile();
 
 module.exports = {
-  request, isAvailable, status, reset, setLogger, setManualPause, isPausedByHand, ollamaNumCtx, LlmUnavailableError,
+  request, isAvailable, status, reset, setLogger, setManualPause, isPausedByHand, onResume, ollamaNumCtx, LlmUnavailableError,
 };
