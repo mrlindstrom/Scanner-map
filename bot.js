@@ -127,7 +127,7 @@ const os = require('os');
 const bcrypt = require('bcryptjs');
 const { createStorage, isDbMode, buildKey } = require('./src/storage');
 const pendingUploads = require('./src/storage/pendingUploads');
-const { runMigrations } = require('./src/db/migrations');
+const { runMigrations, configureConnection } = require('./src/db/migrations');
 const llmQueue = require('./src/ai/llmQueue');
 const { createCatchUp } = require('./src/ai/catchUp');
 const { audioUrl: buildAudioUrl, getPublicBaseUrl } = require('./src/utils/publicUrl');
@@ -1224,6 +1224,7 @@ const db = new sqlite3.Database('./botdata.db', (err) => {
     process.exit(1);
   } else {
     logger.info('Connected to SQLite database.');
+    configureConnection(db, 'bot');
     // Trigger initialization after database connection
     initializeBot().catch((error) => {
       logger.error('Fatal error during bot initialization:', error);

@@ -449,12 +449,24 @@ function mountSetup(app, deps = {}) {
   app.get('/api/setup/log-tail', (req, res) =>
     res.json(maintenance.tailLog(req.query.name, parseInt(req.query.lines, 10) || 200)));
 
-  // Download a backup of the SQLite database.
+  // Download a backup of the SQLite database. In WAL mode the latest changes
+  // can still be in botdata.db-wal, so a copy of botdata.db alone could miss
+  // them; VACUUM INTO writes one consistent file instead.
   app.get('/api/setup/backup-db', (req, res) => {
     const dbPath = path.join(process.cwd(), 'botdata.db');
     if (!fs.existsSync(dbPath)) return res.status(404).json({ ok: false, error: 'Database not found' });
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    res.download(dbPath, `botdata-backup-${stamp}.db`);
+    const name = `botdata-backup-${stamp}.db`;
+    const db = getDb();
+    if (!db) return res.download(dbPath, name);
+    const tmp = path.join(os.tmpdir(), `scanner-map-${process.pid}-${Date.now()}.db`);
+    db.run('VACUUM INTO ?', [tmp], (err) => {
+      if (err) {
+        fs.rm(tmp, { force: true }, () => {});
+        return res.status(500).json({ ok: false, error: `Backup failed: ${err.message}` });
+      }
+      res.download(tmp, name, () => fs.rm(tmp, { force: true }, () => {}));
+    });
   });
 
   // --- Software updates ---

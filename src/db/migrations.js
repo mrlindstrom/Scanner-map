@@ -33,6 +33,11 @@ function runMigrations(db) {
     // transcriptions(system) index is created later, after the column is added.
     `CREATE INDEX IF NOT EXISTS idx_talk_groups_id
        ON talk_groups(id)`,
+    // Mapped calls still without a category (the web server's catch-up sweep);
+    // stays small, where idx_transcriptions_category would walk every
+    // uncategorized unmapped call
+    `CREATE INDEX IF NOT EXISTS idx_transcriptions_uncategorized_mapped
+       ON transcriptions(id) WHERE category IS NULL AND lat IS NOT NULL`,
 
     // ----- New columns for externalized audio storage (nullable, backwards compatible) -----
     // storage_key  : object key in the configured storage backend
@@ -156,4 +161,24 @@ function migrateTalkGroupsToComposite(db, cb) {
   });
 }
 
-module.exports = { runMigrations };
+/**
+ * Settings for every connection to botdata.db. The bot and the web server
+ * each have one, so:
+ * - WAL journal: reads (map loads, summaries, sweeps) don't block the other
+ *   process's writes and the reverse; only two writes at once wait for each
+ *   other. Kept in the database file, so setting it again is a no-op.
+ * - Waiting up to 15 s for a lock instead of sqlite3's 1 s before SQLITE_BUSY.
+ * - synchronous=NORMAL: the usual pairing with WAL (safe on a crash; only a
+ *   power cut can drop the last commits).
+ */
+function configureConnection(db, label = 'db') {
+  db.configure('busyTimeout', 15000);
+  db.get('PRAGMA journal_mode = WAL', (err, row) => {
+    const mode = row && (row.journal_mode || Object.values(row)[0]);
+    if (err) log.warn(`${label}: could not switch to WAL: ${err.message}`);
+    else if (String(mode).toLowerCase() !== 'wal') log.warn(`${label}: journal mode is ${mode}, not WAL`);
+  });
+  db.run('PRAGMA synchronous = NORMAL', () => {});
+}
+
+module.exports = { runMigrations, configureConnection };

@@ -26,7 +26,7 @@ const { applyBaseSecurity, apiLimiter, authLimiter } = require('./src/security/m
 const { createStorage, isDbMode, buildKey } = require('./src/storage');
 const pendingUploads = require('./src/storage/pendingUploads');
 const { mountSetup } = require('./src/setup/routes');
-const { runMigrations } = require('./src/db/migrations');
+const { runMigrations, configureConnection } = require('./src/db/migrations');
 const { getPublicBaseUrl } = require('./src/utils/publicUrl');
 
 const logsDir = path.join(__dirname, 'logs');
@@ -221,6 +221,7 @@ const db = new sqlite3.Database('./botdata.db', sqlite3.OPEN_READWRITE, (err) =>
     console.log('Connected to the SQLite database.');
   }
 });
+configureConnection(db, 'webserver');
 
 db.run(`ALTER TABLE transcriptions ADD COLUMN category TEXT`, err => {
   // Ignore error if column already exists
@@ -1498,12 +1499,15 @@ setInterval(checkForNewCalls, 2000); // Poll for map updates every 2s
 // time while the AI is answering; they're added to open maps quietly
 // ('lateCall': no banner, sound or tracking).
 let categoryCatchUpBusy = false;
+let categoryCatchUpNoIndex = false;
 function categorizeMissedCalls() {
-  if (categoryCatchUpBusy || !llmQueue.isAvailable()) return;
+  if (categoryCatchUpBusy || categoryCatchUpNoIndex || !llmQueue.isAvailable()) return;
   categoryCatchUpBusy = true;
+  // INDEXED BY: left to itself SQLite picks idx_transcriptions_category and
+  // walks millions of uncategorized unmapped calls (~2 s, holding a read lock)
   db.all(
     `SELECT t.*, ${tgResolved('alpha_tag')} AS talk_group_name, ${tgResolved('tag')} AS talk_group_tag
-     FROM transcriptions t
+     FROM transcriptions t INDEXED BY idx_transcriptions_uncategorized_mapped
      WHERE t.id <= ? AND t.category IS NULL AND t.lat IS NOT NULL AND t.lon IS NOT NULL
        AND t.transcription IS NOT NULL AND t.transcription != ''
      ORDER BY t.id ASC
@@ -1512,7 +1516,12 @@ function categorizeMissedCalls() {
     async (err, rows) => {
       try {
         if (err) {
-          console.error('Error checking for uncategorized map calls:', err.message);
+          if (/no such index/i.test(err.message)) {
+            categoryCatchUpNoIndex = true; // migrations didn't create it; skip rather than run the slow scan
+            console.warn('Uncategorized map calls are not checked: the idx_transcriptions_uncategorized_mapped index is missing (restart to create it)');
+          } else {
+            console.error('Error checking for uncategorized map calls:', err.message);
+          }
           return;
         }
         for (const row of rows || []) {

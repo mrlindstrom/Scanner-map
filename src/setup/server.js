@@ -49,7 +49,10 @@ function startSetupServer() {
 
   const db = new sqlite3.Database('./botdata.db', (err) => {
     if (err) log.error(`db open failed: ${err.message}`);
-    else ensureSchema(db);
+    else {
+      require('../db/migrations').configureConnection(db, 'setup');
+      ensureSchema(db);
+    }
   });
 
   mountSetup(app, { getDb: () => db });
