@@ -4230,7 +4230,7 @@ async function processMergedCallSegments(
     });
     const mergedMessageUrl = await postCallMessage(entry, talkGroupID, talkGroupName, systemName);
     scheduleCategoryRefresh(entry);
-    if (lateLocation) lateLocation.then(() => addLateLocation(entry)).catch(() => {});
+    if (lateLocation) lateLocation.lookup.then((outcome) => { if (outcome === 'found') return addLateLocation(entry); }).catch(() => {});
 
     // Keyword alerts on the combined text
     try {
@@ -4306,7 +4306,8 @@ async function analyzeCall(id, transcriptionText, talkGroupID, talkGroupName, sy
       // The AI isn't answering: post the call now instead of holding it, and
       // add the location once the queued request is answered.
       logger.info(`AI is not answering; posting call ${id} now and adding its location when the AI is back`);
-      lateLocation = extractAndProcessAddress(id, transcriptionText, talkGroupID, systemName);
+      // Wrapped: an async function's return value would wait for a bare promise
+      lateLocation = { lookup: extractAndProcessAddress(id, transcriptionText, talkGroupID, systemName) };
     }
   } else if (transcriptionText.length < 15) {
     logger.info(`Skipping address extraction for short transcription (ID ${id}): ${transcriptionText.length} characters`);
@@ -4353,7 +4354,7 @@ async function analyzeCall(id, transcriptionText, talkGroupID, talkGroupName, sy
 
     logger.info(`Tone detection completed for ID ${id}`);
   }
-  return lateLocation;
+  return lateLocation; // { lookup } when the location is added after posting, else null
 }
 
 // For a call posted while the AI was not answering: once its address lookup
@@ -4462,7 +4463,7 @@ async function handleNewTranscription(
     });
     const messageUrl = await postCallMessage(entry, talkGroupID, talkGroupName, systemName);
     scheduleCategoryRefresh(entry);
-    if (lateLocation) lateLocation.then(() => addLateLocation(entry)).catch(() => {});
+    if (lateLocation) lateLocation.lookup.then((outcome) => { if (outcome === 'found') return addLateLocation(entry); }).catch(() => {});
 
     // Keyword alert linking back to the message
     await alertOnKeywords(entry, talkGroupName, systemName, messageUrl);
