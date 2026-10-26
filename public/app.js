@@ -21,7 +21,8 @@ let currentSessionToken = null;
 let selectedCategory = null;
 let timestampUpdateInterval = null;
 let isNewCallAudioMuted = false;
-let isTrackingNewCalls = true; // Default to true so tracking is enabled by defaultlet additionalWavesurfers = {};
+let isTrackingNewCalls = true; // Default to true so tracking is enabled by default
+let additionalWavesurfers = {};
 const talkgroupPageLimit = 30; // How many calls to fetch per page
 let currentTalkgroupOffset = 0;
 let isLoadingMoreTalkgroupCalls = false;
@@ -1078,6 +1079,8 @@ function handleNewCall(call) {
                         CallAudio.enqueue({
                             id: call.id,
                             start: (done) => {
+                                // Tracking turned off while this call waited its turn
+                                if (!isTrackingNewCalls || !markers[call.id]) { done(); return null; }
                                 enqueueAnimation(marker, () => playTrackedMarker(marker, call.id, done));
                                 return () => {
                                     marker.pendingAutoPlay = null; // interrupted before its popup finished loading
@@ -2472,9 +2475,12 @@ function setupCallControls() {
     }
     
     if (trackCheckbox) {
+        // Remembered per browser; on by default
+        try { if (localStorage.getItem('trackNewCalls') === 'false') isTrackingNewCalls = false; } catch (e) { /* no storage */ }
         trackCheckbox.checked = isTrackingNewCalls; // Set initial state
         trackCheckbox.addEventListener('change', function() {
             isTrackingNewCalls = this.checked;
+            try { localStorage.setItem('trackNewCalls', String(isTrackingNewCalls)); } catch (e) { /* no storage */ }
             console.log(`Tracking new calls: ${isTrackingNewCalls}`);
         });
     } else {
