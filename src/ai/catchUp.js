@@ -18,6 +18,11 @@ const path = require('path');
 const FILE = process.env.SCANNER_AI_CATCHUP_FILE || path.join(__dirname, '..', '..', 'data', 'ai-catchup.json');
 const PAGE = 200;
 const SAVE_EVERY_MS = 5000;
+// A lookup can give up in the queue while the AI is up (the model still
+// loading after a resume, live calls ahead of it); wait this long and retry it
+const RETRY_MS = 15000;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * @param {object} o
@@ -131,9 +136,16 @@ function createCatchUp({ db, logger, needsLookup, lookup, isReady }) {
           if (!isReady()) { stopped = true; break; }
           if (needsLookup(row)) {
             current = row.id;
-            const outcome = await lookup(row);
+            let outcome = await lookup(row);
+            // Only a real pause or outage ends the run (onResume starts it again);
+            // giving up in a busy queue while the AI is up would never be resumed
+            while (outcome === 'unavailable' && isReady() && ranges[0] === range) {
+              await sleep(RETRY_MS);
+              if (!isReady() || ranges[0] !== range) break;
+              outcome = await lookup(row);
+            }
             current = null;
-            if (outcome === 'unavailable') { stopped = true; break; } // this call again next time
+            if (outcome === 'unavailable' || ranges[0] !== range) { stopped = true; break; } // this call again next time
             range.done++;
             looked++;
           }

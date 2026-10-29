@@ -42,14 +42,15 @@ class S3Storage {
     this.client = new S3Client(clientConfig);
   }
 
-  async save(key, buffer, contentType = 'audio/mpeg') {
+  async save(key, buffer, contentType = 'audio/mpeg', { signal } = {}) {
     await this.client.send(
       new PutObjectCommand({
         Bucket: this.bucket,
         Key: key,
         Body: buffer,
         ContentType: contentType,
-      })
+      }),
+      { abortSignal: signal }
     );
     this.log.debug(`uploaded ${key} (${buffer.length} bytes)`);
     return { key, url: this.publicUrl(key) };

@@ -98,6 +98,7 @@ add('storage', 'STORAGE_RETRY_INTERVAL_MIN', 'Re-upload every (min)', 'number', 
 // ---- Location
 add('location', 'GOOGLE_MAPS_API_KEY', 'Google Maps API key', 'secret', '', 'Geocoder (LocationIQ is preferred when both are set).', { guided: 'Geocoding' });
 add('location', 'LOCATIONIQ_API_KEY', 'LocationIQ API key', 'secret', '', 'Geocoder.', { guided: 'Geocoding' });
+add('location', 'LOCATIONIQ_REQUESTS_PER_SEC', 'LocationIQ requests per second', 'number', '', 'Blank = 1 (the free plan allows 2 a second but 60 a minute). Raise it for a paid plan.');
 add('location', 'GEOCODING_CITY', 'Main city', 'text', '', 'Fallback town for addresses with no city.', { guided: 'Map & Location' });
 add('location', 'GEOCODING_STATE', 'State', 'text', '', 'Two-letter state code.', { guided: 'Map & Location' });
 add('location', 'GEOCODING_COUNTRY', 'Country', 'text', 'us', 'Two-letter country code.', { guided: 'Map & Location' });
@@ -128,7 +129,7 @@ add('transcription', 'TRANSCRIPTION_DEVICE', 'Compute device', 'select', 'cpu', 
 add('transcription', 'WHISPER_MODEL', 'Whisper model', 'text', 'large-v3-turbo', 'Local mode.', { guided: 'Transcription' });
 add('transcription', 'PYTHON_COMMAND', 'Python command', 'text', 'python', 'Python used for transcription and tone detection.', { guided: 'Transcription' });
 add('transcription', 'AUTO_UPDATE_PYTHON_PACKAGES', 'Install missing Python packages', 'bool', 'true', 'When the local transcriber starts.');
-add('transcription', 'MAX_CONCURRENT_TRANSCRIPTIONS', 'Parallel transcriptions', 'number', '3', 'Calls transcribed at once.', { guided: 'Transcription' });
+add('transcription', 'MAX_CONCURRENT_TRANSCRIPTIONS', 'Parallel transcriptions', 'number', '', 'Remote/OpenAI/ICAD requests sent at once; more calls wait their turn here instead of timing out on the server. Blank = 10.', { guided: 'Transcription' });
 add('transcription', 'TRANSCRIBE_MODE', 'Which talkgroups to transcribe', 'select', 'all', '', { options: ['all', 'whitelist', 'blacklist'], guided: 'Transcription' });
 add('transcription', 'TRANSCRIBE_TALK_GROUPS', 'Talkgroups (white/blacklist)', 'list', '', 'IDs or system:id.', { guided: 'Transcription' });
 add('transcription', 'FASTER_WHISPER_SERVER_URL', 'Remote server URL', 'text', '', 'Remote mode.', { guided: 'Transcription' });

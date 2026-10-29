@@ -66,12 +66,21 @@ function pendingPath(key, cfg = config) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function withTimeout(promise, ms) {
-  if (!ms) return promise;
+// Runs `start(signal)`; past `ms` the signal aborts the attempt, so a stalled
+// upload gives up its connection instead of holding it while later saves queue
+// behind it for a free socket.
+function withTimeout(start, ms) {
+  if (!ms) return start(undefined);
+  const controller = new AbortController();
   let timer;
   return Promise.race([
-    promise,
-    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`timed out after ${ms} ms`)), ms); }),
+    start(controller.signal),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`timed out after ${ms} ms`));
+        controller.abort();
+      }, ms);
+    }),
   ]).finally(() => clearTimeout(timer));
 }
 
@@ -106,7 +115,7 @@ async function saveWithFallback(storage, key, buffer, contentType, cfg = config)
   if (Date.now() >= remoteDownUntil) {
     for (let attempt = 1; attempt <= cfg.attempts; attempt++) {
       try {
-        await withTimeout(storage.save(key, buffer, contentType), cfg.attemptTimeoutMs);
+        await withTimeout((signal) => storage.save(key, buffer, contentType, { signal }), cfg.attemptTimeoutMs);
         return { location: 'remote' };
       } catch (err) {
         lastError = err;
@@ -195,7 +204,8 @@ async function flushPending(storage, { getRow, markUploaded, batchSize = 200 } =
         } else {
           const ext = path.extname(key).toLowerCase();
           const contentType = ext === '.m4a' ? 'audio/mp4' : ext === '.wav' ? 'audio/wav' : 'audio/mpeg';
-          await withTimeout(storage.save(key, await fsp.readFile(file), contentType), cfg.attemptTimeoutMs);
+          const body = await fsp.readFile(file);
+          await withTimeout((signal) => storage.save(key, body, contentType, { signal }), cfg.attemptTimeoutMs);
           if (markUploaded) await markUploaded(key);
           await fsp.unlink(file);
           stats.uploaded++;

@@ -1,6 +1,11 @@
 // bot.js - Main Discord bot application with integrated webserver and initialization
 
 require('dotenv').config();
+// sqlite3 queries, file reads/writes (log files, audio uploads) and DNS lookups
+// share libuv's thread pool, 4 threads by default. A few slow queries or lock
+// waits (up to the 15 s busy timeout) would leave transcription uploads and
+// log writes waiting for a thread. Takes effect only before the pool's first use.
+if (!process.env.UV_THREADPOOL_SIZE) process.env.UV_THREADPOOL_SIZE = '16';
 // Direct console.* output (startup checks, geocoding) uses the shared log layout
 require('./src/consoleFormat').patchConsole('bot');
 
@@ -171,7 +176,6 @@ let MAPPED_TALK_GROUPS, IS_MAPPED_TALK_GROUPS_ENABLED;
 let IS_SUMMARY_TALK_GROUPS_ENABLED, SUMMARY_TALK_GROUPS;
 let TRANSCRIBE_MODE_VALUE, TRANSCRIBE_TALK_GROUPS;
 let IS_TWO_TONE_MODE_ENABLED, TWO_TONE_TALK_GROUPS, TWO_TONE_QUEUE_SIZE_VALUE;
-let MAX_CONCURRENT_TRANSCRIPTIONS_VALUE;
 // Map-only mode decides at startup whether Discord is used, so it needs a restart
 const IS_MAP_ONLY_MODE = String(MAP_ONLY_MODE).toLowerCase() === 'true';
 
@@ -209,10 +213,6 @@ function computeDerivedSettings() {
     ? twoToneTalkGroupsString.split(',').map(id => id.trim())
     : [];
   TWO_TONE_QUEUE_SIZE_VALUE = parseInt(TWO_TONE_QUEUE_SIZE, 10) || 1;
-
-  // MAX_CONCURRENT_TRANSCRIPTIONS from env, or the default
-  const parsedMaxConcurrent = parseInt(MAX_CONCURRENT_TRANSCRIPTIONS, 10);
-  MAX_CONCURRENT_TRANSCRIPTIONS_VALUE = !isNaN(parsedMaxConcurrent) && parsedMaxConcurrent > 0 ? parsedMaxConcurrent : 3;
 }
 computeDerivedSettings();
 
@@ -251,7 +251,7 @@ const QUEUE_DRAIN_THRESHOLD = 40; // Start warning when queue gets large
 const PRIORITY_QUEUE_THRESHOLD = 30; // Start prioritizing newer items
 
 // NOTE: For very busy systems with lots of concurrent calls, consider:
-// 1. Increasing MAX_CONCURRENT_TRANSCRIPTIONS in .env (default is 3, try 5-8 for busy systems)
+// 1. Remote/OpenAI/ICAD modes: MAX_CONCURRENT_TRANSCRIPTIONS in .env (requests sent at once, default 10)
 // 2. Using a faster GPU for local transcription or switching to 'remote' mode
 // 3. Monitoring memory usage and adjusting MAX_QUEUE_SIZE if needed
 // 4. Consider using 'openai' transcription mode for highest reliability under load
@@ -740,6 +740,7 @@ const logger = winston.createLogger({
   ]
 });
 llmQueue.setLogger({ warn: (m) => logger.warn(m), info: (m) => logger.info(m, { console: true }) });
+require('./src/diagnostics/stallWatchdog').startStallWatchdog({ logger });
 
 // --- Storage backend (local | s3 | r2 | b2 | minio | db) ---
 let storage = null;
@@ -2561,7 +2562,7 @@ function startProcessHealthCheck() {
     
     // High-volume system monitoring
     if (queueSize > QUEUE_DRAIN_THRESHOLD && !queueWarningLogged) {
-      logger.warn(`HIGH VOLUME: Transcription queue is backing up with ${queueSize} items. Consider increasing MAX_CONCURRENT_TRANSCRIPTIONS or checking system resources.`);
+      logger.warn(`HIGH VOLUME: Transcription queue is backing up with ${queueSize} items. Consider a faster GPU, the remote/ICAD transcriber, or checking system resources.`);
       queueWarningLogged = true;
     } else if (queueSize <= QUEUE_DRAIN_THRESHOLD / 2) {
       queueWarningLogged = false; // Reset warning when queue drains
@@ -2972,17 +2973,57 @@ async function transcribeWithICADAPI(filePath, callback) {
 let AUDIO_PREPROCESS_CONFIG = audioPreprocess.loadConfig();
 let TRANSCRIPT_FILTER_CONFIG = hallucinationFilter.loadConfig();
 
+// API transcription modes (remote/openai/icad) send at most
+// MAX_CONCURRENT_TRANSCRIPTIONS requests at once. A burst (trunk-recorder
+// replaying its backlog after a restart, a merged call's segments) waits here
+// instead of piling onto the server, where every request's 120 s timeout would
+// also count its time in the server's queue.
+const apiTranscriptionWaiting = [];
+let apiTranscriptionsActive = 0;
+let apiBacklogWarnedAt = 0;
+
+function apiTranscriptionLimit() {
+  const n = parseInt(process.env.MAX_CONCURRENT_TRANSCRIPTIONS, 10);
+  return n > 0 ? n : 10;
+}
+
+function sendToTranscriptionApi(audioPath, callback) {
+  if (effectiveTranscriptionMode === 'openai') return transcribeWithOpenAIAPI(audioPath, callback);
+  if (effectiveTranscriptionMode === 'remote') return transcribeAudioRemotely(audioPath, callback);
+  return transcribeWithICADAPI(audioPath, callback);
+}
+
+function pumpApiTranscriptions() {
+  while (apiTranscriptionsActive < apiTranscriptionLimit() && apiTranscriptionWaiting.length) {
+    const { audioPath, callback } = apiTranscriptionWaiting.shift();
+    apiTranscriptionsActive++;
+    let finished = false;
+    const done = (text) => {
+      if (finished) return; // the senders can answer twice if the callback throws
+      finished = true;
+      apiTranscriptionsActive--;
+      setImmediate(pumpApiTranscriptions);
+      callback(text);
+    };
+    Promise.resolve(sendToTranscriptionApi(audioPath, done)).catch((err) => {
+      logger.error(`Transcription request failed for ${path.basename(audioPath)}: ${err.message}`);
+      done('');
+    });
+  }
+  if (apiTranscriptionWaiting.length >= 50 && Date.now() - apiBacklogWarnedAt > 60000) {
+    apiBacklogWarnedAt = Date.now();
+    logger.warn(`Transcription backlog: ${apiTranscriptionWaiting.length} calls waiting, ${apiTranscriptionsActive} being transcribed (MAX_CONCURRENT_TRANSCRIPTIONS=${apiTranscriptionLimit()})`);
+  }
+}
+
 // Send a file to the API-based transcription modes (local mode queues its own payload).
 function transcribeByMode(audioPath, callback) {
-  if (effectiveTranscriptionMode === 'openai') {
-    transcribeWithOpenAIAPI(audioPath, callback);
-  } else if (effectiveTranscriptionMode === 'remote') {
-    transcribeAudioRemotely(audioPath, callback);
-  } else if (effectiveTranscriptionMode === 'icad') {
-    transcribeWithICADAPI(audioPath, callback);
-  } else {
+  if (!['openai', 'remote', 'icad'].includes(effectiveTranscriptionMode)) {
     transcribeAudio(audioPath, callback);
+    return;
   }
+  apiTranscriptionWaiting.push({ audioPath, callback });
+  pumpApiTranscriptions();
 }
 
 // Clean up the audio, run `transcribeFn(audioPath, wasPreprocessed, done)`,
@@ -3509,7 +3550,9 @@ function handleNewAudio(audioData) {
           if (!STORAGE_IS_LOCAL) {
             // Remote object storage: retry, then park the file locally for the
             // re-upload job (pendingUploads.flushPending) instead of dropping the
-            // call. The temp file stays as transcription input either way.
+            // call. Transcription reads the temp file, so it starts right away
+            // rather than waiting out the upload's retries when storage is slow.
+            afterStorageComplete(null);
             pendingUploads.saveWithFallback(storage, storagePath, fileBuffer, contentType)
               .then((result) => {
                 if (result.location === 'remote') {
@@ -3525,11 +3568,9 @@ function handleNewAudio(audioData) {
                     [transcriptionId], () => {});
                   logger.error(`Audio for ID ${transcriptionId} could not be stored anywhere; keeping the call and transcript without audio`);
                 }
-                afterStorageComplete(null);
               })
               .catch((storeErr) => {
-                logger.error(`Unexpected storage error for ID ${transcriptionId}: ${storeErr.message}; transcribing anyway`);
-                afterStorageComplete(null);
+                logger.error(`Unexpected storage error for ID ${transcriptionId}: ${storeErr.message}`);
               });
           } else {
           // Local disk storage
@@ -4229,7 +4270,7 @@ async function processMergedCallSegments(
       durationSec: lastSegment && lastSegment.endPos,
       startTime: null,
     });
-    const mergedMessageUrl = await postCallMessage(entry, talkGroupID, talkGroupName, systemName);
+    const mergedMessageUrl = await postCallMessage(entry, talkGroupID, talkGroupName, systemName, talkGroupGroup);
     scheduleCategoryRefresh(entry);
     if (lateLocation) lateLocation.lookup.then((outcome) => { if (outcome === 'found') return addLateLocation(entry); }).catch(() => {});
 
@@ -4462,7 +4503,7 @@ async function handleNewTranscription(
       emergency,
       encrypted,
     });
-    const messageUrl = await postCallMessage(entry, talkGroupID, talkGroupName, systemName);
+    const messageUrl = await postCallMessage(entry, talkGroupID, talkGroupName, systemName, talkGroupGroup);
     scheduleCategoryRefresh(entry);
     if (lateLocation) lateLocation.lookup.then((outcome) => { if (outcome === 'found') return addLateLocation(entry); }).catch(() => {});
 
@@ -4717,7 +4758,7 @@ async function gatherCallDetails(id, transcriptionText, talkGroupID) {
 }
 
 // The talkgroup's text channel (and its display name), creating it if needed.
-function resolveCallChannel(talkGroupID, talkGroupName, systemName) {
+function resolveCallChannel(talkGroupID, talkGroupName, systemName, talkGroupGroup) {
   return new Promise((resolve) => {
     // Scoped to the originating system (falls back to legacy ''-system rows for single-system)
     const sysKey = normalizeSystemLabel(systemName);
@@ -4732,9 +4773,11 @@ function resolveCallChannel(talkGroupID, talkGroupName, systemName) {
           return resolve(null);
         }
         if (!row) {
-          // Not in the imported CSV(s): post under "Uncategorized" with the scanner's name
-          logger.warn(`Talkgroup ${talkGroupID} (system: ${sysKey || 'n/a'}) not in DB — posting under "Uncategorized" using scanner-provided name. Import its CSV for proper mapping.`);
-          row = { alpha_tag: talkGroupName || `TG ${talkGroupID}`, county: null };
+          // Not in the imported CSV(s): use the scanner's name and group (the
+          // radio source's own talkgroup list), else "Uncategorized"
+          const group = String(talkGroupGroup || '').trim();
+          logger.warn(`Talkgroup ${talkGroupID} (system: ${sysKey || 'n/a'}) not in DB — posting under "${group || 'Uncategorized'}" using scanner-provided name. Import its CSV for proper mapping.`);
+          row = { alpha_tag: talkGroupName || `TG ${talkGroupID}`, county: group || null };
         }
         const fullTalkGroupName = row.alpha_tag || talkGroupName || `TG ${talkGroupID}`;
         getOrCreateCategory(row.county || 'Uncategorized', (category) => {
@@ -4782,8 +4825,8 @@ function syncStateCacheFields(state) {
  * Post a call to its talkgroup channel, appending to the recent message when it
  * fits. Resolves with the message URL (or undefined on failure).
  */
-async function postCallMessage(entry, talkGroupID, talkGroupName, systemName) {
-  const target = await resolveCallChannel(talkGroupID, talkGroupName, systemName);
+async function postCallMessage(entry, talkGroupID, talkGroupName, systemName, talkGroupGroup) {
+  const target = await resolveCallChannel(talkGroupID, talkGroupName, systemName, talkGroupGroup);
   if (!target) return undefined;
   const { channel, fullTalkGroupName } = target;
 
@@ -5154,9 +5197,12 @@ async function summaryAiCompletion(prompt) {
         prompt,
         stream: false,
         format: 'json',
+        // Thinking models (qwen3) would otherwise spend the reply budget reasoning
+        // and stop before writing any JSON
+        think: false,
         // num_ctx must match Scanner Map's other Ollama requests or the model reloads.
         // Ollama serves one request at a time, so cap the reply to keep address extraction from waiting long.
-        options: { num_ctx: llmQueue.ollamaNumCtx(), temperature: 0.2, num_predict: 900 },
+        options: { num_ctx: llmQueue.ollamaNumCtx(), temperature: 0.2, num_predict: 1500 },
       }),
     }, queueOpts);
     if (!response.ok) throw new Error(`Ollama API error ${response.status}`);

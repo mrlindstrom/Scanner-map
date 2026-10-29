@@ -689,6 +689,48 @@ let targetViewbox = null;        // "minLon,minLat,maxLon,maxLat" for LocationIQ
 let targetViewboxPromise = null;
 let streetGazetteer = [];
 
+// Every LocationIQ request takes its turn here, LOCATIONIQ_REQUESTS_PER_SEC
+// apart (1 = the free plan's 60 a minute), since live calls and the AI
+// catch-up geocode at the same time. A 429 waits and tries again: a second or
+// minute limit holds back every request until it clears; the daily limit isn't
+// retried.
+let locationIqNextAt = 0;
+let locationIqBlockedUntil = 0; // after a 429, nobody sends before this
+let locationIqDayWarnedAt = 0;
+
+function locationIqGapMs() {
+  const n = parseFloat(process.env.LOCATIONIQ_REQUESTS_PER_SEC);
+  return 1000 / (n > 0 ? n : 1);
+}
+
+async function locationIqFetch(url) {
+  for (let attempt = 1; ; attempt++) {
+    // Wait for a turn; a 429 meanwhile pushes everyone already waiting back too
+    do {
+      const now = Date.now();
+      const at = Math.max(now, locationIqNextAt, locationIqBlockedUntil);
+      locationIqNextAt = at + locationIqGapMs();
+      if (at > now) await new Promise((r) => setTimeout(r, at - now));
+    } while (Date.now() < locationIqBlockedUntil);
+    const res = await fetch(url);
+    if (res.status !== 429) return res;
+    const why = String(await res.clone().text().catch(() => '')).match(/rate limited (second|minute|day)/i);
+    const limit = why ? why[1].toLowerCase() : 'second';
+    if (limit === 'day') {
+      if (Date.now() - locationIqDayWarnedAt > 3600000) {
+        locationIqDayWarnedAt = Date.now();
+        logger.error('[Geocoding] LocationIQ daily request limit reached; calls are posted without a location until it resets');
+      }
+      return res;
+    }
+    if (attempt >= 4) return res;
+    const retryAfter = parseInt(res.headers.get('retry-after'), 10);
+    const waitMs = retryAfter > 0 ? retryAfter * 1000 : (limit === 'minute' ? 30000 : 2000 * attempt);
+    logger.warn(`[Geocoding] LocationIQ per-${limit} limit hit; waiting ${Math.round(waitMs / 1000)}s before trying again`);
+    locationIqBlockedUntil = Math.max(locationIqBlockedUntil, Date.now() + waitMs);
+  }
+}
+
 async function getTargetViewbox() {
   if (targetViewbox !== null || !LOCATIONIQ_API_KEY) return targetViewbox || null;
   if (!targetViewboxPromise) {
@@ -698,11 +740,10 @@ async function getTargetViewbox() {
         const name = /county|parish/i.test(county) ? county : `${county} County`;
         const params = new URLSearchParams({ q: `${name}, ${GEOCODING_STATE}`, key: LOCATIONIQ_API_KEY, format: 'json', limit: '1', countrycodes: COUNTRY_CODES });
         try {
-          const res = await fetch(`https://us1.locationiq.com/v1/search?${params}`);
+          const res = await locationIqFetch(`https://us1.locationiq.com/v1/search?${params}`);
           const data = res.ok ? await res.json() : [];
           const bb = Array.isArray(data) && data[0] && data[0].boundingbox; // [south, north, west, east]
           if (bb) boxes.push(bb.map(Number));
-          await new Promise((r) => setTimeout(r, 600)); // free plan: 2 requests/second
         } catch (e) {
           logger.warn(`[Geocoding] Could not look up the area of ${name}: ${e.message}`);
         }
@@ -755,7 +796,7 @@ async function locationIqSearch(query, viewbox) {
     dedupe: '1',
   });
   if (viewbox) { params.set('viewbox', viewbox); params.set('bounded', '1'); }
-  const response = await fetch(`https://us1.locationiq.com/v1/search?${params.toString()}`);
+  const response = await locationIqFetch(`https://us1.locationiq.com/v1/search?${params.toString()}`);
   if (response.status === 404) return []; // LocationIQ answers "no results" with 404
   if (!response.ok) {
     logger.error(`LocationIQ API error: ${response.status} ${response.statusText} for query: "${query}"`);
@@ -851,10 +892,9 @@ async function loadPlaceList() {
  * list covers the search box, which reaches past them).
  */
 async function placeInTargetArea(place) {
-  await new Promise((r) => setTimeout(r, 500)); // free plan: 2 requests/second
   const params = new URLSearchParams({ lat: String(place.lat), lon: String(place.lon), key: LOCATIONIQ_API_KEY, format: 'json', addressdetails: '1', normalizeaddress: '1' });
   try {
-    const res = await fetch(`https://us1.locationiq.com/v1/reverse?${params}`);
+    const res = await locationIqFetch(`https://us1.locationiq.com/v1/reverse?${params}`);
     if (!res.ok) {
       logger.warn(`[Geocoding] Could not check where "${place.name}" is: LocationIQ ${res.status}`);
       return null;
@@ -893,7 +933,6 @@ async function geocodeAddressWithLocationIQ(address) {
       if (corrected) {
         const correctedAddress = address.replace(spokenStreet, corrected.road);
         logger.info(`[Geocoding] "${spokenStreet}" not found; trying likely street "${corrected.road}" (match ${corrected.score})`);
-        await new Promise((r) => setTimeout(r, 500)); // free plan: 2 requests/second
         ({ pick, exactHouse, judged, count } = await bestLocationIqMatch(correctedAddress, corrected.road, houseNumber, viewbox));
         usedQuery = correctedAddress;
       }
@@ -906,7 +945,6 @@ async function geocodeAddressWithLocationIQ(address) {
     if (!pick && !spokenStreet && parts.length <= 2 && !/\s(&|and)\s/i.test(parts[0])) {
       for (const town of townsForPlace(parts[0])) {
         const withTown = `${parts[0]}, ${town}, ${GEOCODING_STATE}`;
-        await new Promise((r) => setTimeout(r, 500)); // free plan: 2 requests/second
         ({ pick, exactHouse, judged, count } = await bestLocationIqMatch(withTown, null, houseNumber, viewbox));
         usedQuery = withTown;
         if (pick) {

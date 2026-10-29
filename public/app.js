@@ -159,6 +159,8 @@ let categoryCounts = {
   'INTOXICATED PERSON': 0,
   'MVC': 0,
   'ANIMAL BITE': 0, // Added
+  'UNKNOWN PROBLEM': 0,
+  'OUTSIDE FIRE': 0,
   'ASSIST': 0,      // Added
   'OTHER': 0
 };
@@ -177,10 +179,12 @@ const CATEGORY_COLORS = {
     'BREATHING PROBLEMS':                '#F06292', // Medium Pink
     'PASSED OUT PERSON':                 '#F06292', // Medium Pink
     'ANIMAL BITE':                       '#EF5350', // Slightly Lighter Red
+    'UNKNOWN PROBLEM':                   '#EF5350', // Slightly Lighter Red (person down, cause not known)
 
     // Fire Related (Oranges - avoiding pure yellow)
     'STRUCTURE FIRE':                    '#F57C00', // Strong Orange
     'BUILDING FIRE':                     '#F57C00', // Strong Orange
+    'OUTSIDE FIRE':                      '#FB8C00', // Orange (grass, brush, vehicle)
     'FIRE ALARM':                        '#FFA726', // Lighter Orange (Amber)
     'CARBON MONOXIDE':                   '#FFA726', // Lighter Orange (Amber)
     'HAZMAT':                            '#E65100', // Darker Orange/Brownish
@@ -2823,7 +2827,7 @@ const HEATMAP_MODES = {
 // Category weights for the "Emergencies" mode (keys match CATEGORY_COLORS)
 const HEATMAP_SEVERITY = [
     [/FIRE|HAZMAT|CARBON MONOXIDE|GUN|ASSAULT|ABDUCTION|SHOOTING|STABBING/, 3],
-    [/MEDICAL|UNCONSCIOUS|BREATHING|INJURED|PASSED OUT|CONSCIOUSNESS|COLLISION|MVC|FIGHT/, 2],
+    [/MEDICAL|UNCONSCIOUS|BREATHING|INJURED|PASSED OUT|CONSCIOUSNESS|COLLISION|MVC|FIGHT|UNKNOWN PROBLEM/, 2],
     [/BURGLARY|DISTURBANCE|STOLEN|RECKLESS|TRAFFIC|MISSING|INTOXICATED|ANIMAL BITE/, 1.25],
 ];
 

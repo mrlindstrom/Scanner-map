@@ -22,7 +22,7 @@ const llmQueue = require('./src/ai/llmQueue');
 const fs = require('fs');
 
 // --- Modernized shared modules ---
-const { applyBaseSecurity, apiLimiter, authLimiter } = require('./src/security/middleware');
+const { applyBaseSecurity, trustedProxies, apiLimiter, authLimiter } = require('./src/security/middleware');
 const { createStorage, isDbMode, buildKey } = require('./src/storage');
 const pendingUploads = require('./src/storage/pendingUploads');
 const { mountSetup } = require('./src/setup/routes');
@@ -91,7 +91,7 @@ if (LOCATIONIQ_API_KEY) {
 }
 
 const app = express();
-app.set('trust proxy', 1);
+app.set('trust proxy', trustedProxies()); // req.ip = the visitor, not Cloudflare
 applyBaseSecurity(app); // helmet + compression
 app.use(express.json()); // parse JSON bodies
 app.use('/api/', apiLimiter);
@@ -306,24 +306,29 @@ const pendingBasicSessions = new Map();
 
 /**
  * Session for a Basic-auth request: the newest unexpired session for this user
- * from the same browser (IP + user agent), or a new one. The MAX_SESSIONS cap
- * is only applied when a new session is actually created.
+ * from the same browser (user agent), or a new one. The MAX_SESSIONS cap is
+ * only applied when a new session is actually created.
+ *
+ * Not matched on IP: behind Cloudflare (or on a phone) the address changes
+ * every few minutes, which minted a new session each time and evicted tokens
+ * still in use, like the open Settings page's. The password is checked on
+ * every request anyway.
  */
 function getOrCreateBasicSession(userId, req) {
-  const ipAddress = req.ip;
   const userAgent = req.get('user-agent') || '';
-  const key = `${userId}|${ipAddress}|${userAgent}`;
+  const key = `${userId}|${userAgent}`;
   if (pendingBasicSessions.has(key)) return pendingBasicSessions.get(key);
 
   const work = (async () => {
     const existing = await dbGetAsync(
       `SELECT token, expires_at FROM sessions
-       WHERE user_id = ? AND ip_address IS ? AND user_agent IS ? AND expires_at > datetime('now')
+       WHERE user_id = ? AND user_agent IS ? AND expires_at > datetime('now')
        ORDER BY created_at DESC LIMIT 1`,
-      [userId, ipAddress, userAgent]
+      [userId, userAgent]
     );
     if (existing) {
-      await dbRunAsync('UPDATE sessions SET last_activity = CURRENT_TIMESTAMP WHERE token = ?', [existing.token]);
+      await dbRunAsync('UPDATE sessions SET last_activity = CURRENT_TIMESTAMP, ip_address = ? WHERE token = ?',
+        [req.ip, existing.token]);
       return { token: existing.token, expiresAt: existing.expires_at };
     }
 
@@ -371,8 +376,28 @@ async function generateShortSummary(transcript) {
       'Altered Level of Consciousness', 'Breathing Problems', 'Fight',
       'Carbon Monoxide', 'Abduction', 'Passed Out Person', 'Hazmat',
       'Fire Alarm', 'Traffic Hazard', 'Intoxicated Person', 'Mvc', // Note: Mvc is often redundant with Vehicle Collision
-      'Animal Bite',
+      'Animal Bite', 'Unknown Problem', 'Outside Fire',
       'Assist'
+    ];
+
+    // Call types as local fire/EMS dispatch says them (and as the transcriber
+    // often hears them), so the AI doesn't have to guess which category fits
+    const dispatchPhrases = [
+      ['motor vehicle incident, motor vehicle collision, MVC, major or minor accident, wreck', 'Vehicle Collision'],
+      ['fire alarm, alarm, automatic alarm, commercial or residential alarm', 'Fire Alarm'],
+      ['carbon monoxide alarm, CO alarm', 'Carbon Monoxide'],
+      ['gas leak, smell of gas, odor of gas, electrical hazard, wires down', 'Hazmat'],
+      ['structure fire, commercial or residential light structure, pre-alert structure fire', 'Structure Fire'],
+      ['outside fire, outside small fire, grass fire, brush fire, trash or dumpster fire, vehicle fire', 'Outside Fire'],
+      ['breathing problems, respiratory, difficulty breathing', 'Breathing Problems'],
+      ['unconscious person, unconscious fainting (heard as "unconscious painting"), fainting', 'Unconscious Person'],
+      ['altered mental status, altered level of consciousness', 'Altered Level of Consciousness'],
+      ['injured person from a fall, injured party from a fall, fall, traumatic injury, laceration', 'Injured Person'],
+      ['cardiac arrest, cardiac, heart problems, stroke, seizures, hemorrhage, overdose, ingestion, diabetic, emotional crisis, allergic reaction, choking', 'Medical Emergency'],
+      ['medical call, sick person (heard as "sieg person"), BLS response, chest pain (heard as "Jeff Payne", "chess payne", "chespain"), transfer evaluation', 'Medical Call'],
+      ['unknown problem (heard as "a known problem"), person down', 'Unknown Problem'],
+      ['lift assist, assist a citizen, mutual aid, assist outside agency', 'Assist'],
+      ['service call, lockout, water problem', 'Service Call'],
     ];
 
     // This prompt works well for both Ollama and OpenAI's chat models
@@ -384,7 +409,11 @@ Focus on the primary reason for the dispatch if multiple events are mentioned.
 
 **PRIORITIZATION:**
 - If a clear event type (like Vehicle Collision, Fire, Assault, Medical Emergency, etc.) is mentioned, **use that category even if the dispatcher says "no details"** or the information is minimal. do not add stars around your output such as "**GAS LEAK**".
+- If the dispatcher states a call type that is one of the category names, use that exact category (e.g. "unknown problem" is Unknown Problem, not Medical Emergency).
 - Use the 'Other' category ONLY if the transmission primarily contains just location/unit information OR if no specific event type from the list is mentioned at all.
+
+**COMMON DISPATCH PHRASES** (call type said => category):
+${dispatchPhrases.map(([said, cat]) => `- ${said} => ${cat}`).join('\n')}
 
 It is CRUCIAL that your response is ONLY one of the category names from this list and nothing else.
 
@@ -445,9 +474,13 @@ Category:`;
             model: OLLAMA_MODEL,
             prompt: commonPrompt, // The prompt is compatible
             stream: false,
+            // Thinking models (qwen3) reason for ~10s first, past the 10s
+            // timeout, and the call was filed as OTHER; the answer is the same without it
+            think: false,
             options: {
                 temperature: 0.3,
-				num_ctx: llmQueue.ollamaNumCtx()
+				num_ctx: llmQueue.ollamaNumCtx(),
+                num_predict: 20 // a category name is short
             }
           }),
         }, queueOpts);
@@ -1694,7 +1727,7 @@ app.get('/api/categories', (req, res) => {
     'Altered Level of Consciousness', 'Breathing Problems', 'Fight',
     'Carbon Monoxide', 'Abduction', 'Passed Out Person', 'Hazmat',
     'Fire Alarm', 'Traffic Hazard', 'Intoxicated Person', 'Mvc',
-    'Animal Bite', 'Assist', 'Other'
+    'Animal Bite', 'Unknown Problem', 'Outside Fire', 'Assist', 'Other'
   ];
   
   res.json(categories);

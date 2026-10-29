@@ -958,9 +958,19 @@
   };
 
   // Safe admin fetch that tolerates non-JSON error bodies (e.g. 401 text).
-  async function adminFetch(path, opts = {}) {
+  async function adminFetch(path, opts = {}, retried = false) {
     const headers = authHeaders({ 'Content-Type': 'application/json', ...(opts.headers || {}) });
     const res = await fetch(path, { ...opts, headers });
+    // The token can be retired while the page sits open (session cap, logout
+    // elsewhere); get the browser's current one and try once more.
+    if ((res.status === 401 || res.status === 403) && authToken && !retried) {
+      const sess = await fetch('/api/sessions/current').then((r) => r.json()).catch(() => null);
+      const fresh = sess && sess.session && sess.session.token;
+      if (fresh && fresh !== authToken) {
+        authToken = fresh;
+        return adminFetch(path, opts, true);
+      }
+    }
     const text = await res.text();
     let data = null;
     try { data = text ? JSON.parse(text) : null; } catch { data = { error: text }; }
@@ -2176,8 +2186,11 @@
 
     function show(d) {
       if (!d || !d.ok) {
-        box.hidden = !!(d && d.status === 403); // not an admin: nothing to offer
-        info.textContent = 'AI status unavailable';
+        // Never had access: not an admin, nothing to offer. Lost it later: say so.
+        box.hidden = paused == null && !!(d && d.status === 403);
+        info.textContent = d && (d.status === 401 || d.status === 403)
+          ? 'Signed out; reload the page'
+          : 'AI status unavailable';
         btn.disabled = true;
         return;
       }

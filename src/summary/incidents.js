@@ -43,7 +43,7 @@ function candidateLine(c, timeLabel) {
  */
 // The prompt shares Scanner Map's Ollama context (OLLAMA_NUM_CTX tokens, roughly
 // 4 characters each). About 4200 tokens go to the instructions and the reply
-// (num_predict 900) with room to spare; the calls get the rest: 16000
+// (num_predict 1500) with room to spare; the calls get the rest: 16000
 // characters at the default 8192, more with a larger context. A context too
 // small for that still gets about a quarter of it for calls.
 const RESERVED_TOKENS = 4192;
