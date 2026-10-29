@@ -395,7 +395,7 @@ async function generateShortSummary(transcript) {
       ['injured person from a fall, injured party from a fall, fall, traumatic injury, laceration', 'Injured Person'],
       ['cardiac arrest, cardiac, heart problems, stroke, seizures, hemorrhage, overdose, ingestion, diabetic, emotional crisis, allergic reaction, choking', 'Medical Emergency'],
       ['medical call, sick person (heard as "sieg person"), BLS response, chest pain (heard as "Jeff Payne", "chess payne", "chespain"), transfer evaluation', 'Medical Call'],
-      ['unknown problem (heard as "a known problem"), person down', 'Unknown Problem'],
+      ['unknown problem (heard as "a known problem"), person down; ONLY these words, never as a catch-all for unclear calls', 'Unknown Problem'],
       ['lift assist, assist a citizen, mutual aid, assist outside agency', 'Assist'],
       ['service call, lockout, water problem', 'Service Call'],
     ];
