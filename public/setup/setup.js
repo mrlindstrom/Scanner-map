@@ -1016,9 +1016,14 @@
       const selAll = el('button', { class: 'btn btn-sm', type: 'button' }, '☑ Select all (filtered)');
       const selNone = el('button', { class: 'btn btn-sm', type: 'button' }, '☐ Clear selection');
       const cleanupBtn = el('button', { class: 'btn btn-sm', type: 'button' }, '🧹 Remove empty channels');
+      const staleBtn = el('button', { class: 'btn btn-sm', type: 'button', title: 'Tick channels whose name or category no longer matches your talkgroup list' }, '🔎 Select stale channels');
       const delBtn = el('button', { class: 'btn btn-sm btn-danger', type: 'button' }, '🗑 Delete selected');
-      bulk.appendChild(selAll); bulk.appendChild(selNone); bulk.appendChild(cleanupBtn); bulk.appendChild(delBtn);
+      bulk.appendChild(selAll); bulk.appendChild(selNone); bulk.appendChild(cleanupBtn); bulk.appendChild(staleBtn); bulk.appendChild(delBtn);
       c.appendChild(bulk);
+      c.appendChild(el('div', { class: 'hint' },
+        '<b>Select stale channels</b> ticks talkgroup channels that are no longer where your talkgroup list puts them: renamed talkgroups, ' +
+        'talkgroups moved to another category, or talkgroups not in the list (those are re-created on their next call). ' +
+        'Dispatch summary, alert and hand-made channels are never included. Review the ticks, then <b>Delete selected</b>.'));
 
       const countLbl = el('div', { class: 'hint' }, '');
       c.appendChild(countLbl);
@@ -1040,7 +1045,8 @@
         const cf = catFilter.value;
         const rows = allChannels.filter((ch) => {
           if (cf === '__none__' && ch.parentId) return false;
-          if (cf && cf !== '__all__' && cf !== '__none__' && ch.parentId !== cf) return false;
+          if (cf === '__selected__' && !selChannels.has(ch.id)) return false;
+          if (cf && !['__all__', '__none__', '__selected__'].includes(cf) && ch.parentId !== cf) return false;
           if (q && !(`${ch.name} ${ch.category || ''}`.toLowerCase().includes(q))) return false;
           return true;
         });
@@ -1103,17 +1109,42 @@
         if (!r.data || !r.data.ok) { wrap.textContent = (r.data && r.data.error) || 'Could not load channels.'; catWrap.textContent = ''; return; }
         allChannels = r.data.channels || [];
         allCategories = r.data.categories || [];
-        // Rebuild category filter dropdown
+        // Rebuild category filter dropdown, keeping the current choice
+        const prevFilter = catFilter.value;
         catFilter.innerHTML = '';
         const optAll = el('option', { value: '__all__' }); optAll.textContent = 'All categories'; catFilter.appendChild(optAll);
+        const optSel = el('option', { value: '__selected__' }); optSel.textContent = '(Selected only)'; catFilter.appendChild(optSel);
         const optNone = el('option', { value: '__none__' }); optNone.textContent = '(Uncategorized)'; catFilter.appendChild(optNone);
         allCategories.forEach((cat) => { const o = el('option', { value: cat.id }); o.textContent = `${cat.name} (${cat.channelCount})`; catFilter.appendChild(o); });
+        if (prevFilter && Array.from(catFilter.options).some((o) => o.value === prevFilter)) catFilter.value = prevFilter;
         // Drop selections that no longer exist
         const chIds = new Set(allChannels.map((x) => x.id));
         const catIds = new Set(allCategories.map((x) => x.id));
         Array.from(selChannels).forEach((id) => { if (!chIds.has(id)) selChannels.delete(id); });
         Array.from(selCategories).forEach((id) => { if (!catIds.has(id)) selCategories.delete(id); });
         renderAll();
+        return r.data;
+      };
+
+      // A delete runs in the bot's background; poll until it finishes.
+      const watchDelete = async () => {
+        delBtn.disabled = true;
+        for (;;) {
+          await new Promise((res) => setTimeout(res, 4000));
+          const data = await load();
+          const job = data && data.deleteJob;
+          if (!job) break;
+          delBtn.textContent = job.running
+            ? `Deleting… ${job.removedChannels}/${job.totalChannels}`
+            : '🗑 Delete selected';
+          if (!job.running) {
+            toast(`Deleted ${job.removedChannels} channel(s), ${job.removedCategories} category(ies)`, 'ok');
+            if (job.errors && job.errors.length) { console.warn('Discord delete errors:', job.errors); toast(`${job.errors.length} item(s) could not be deleted (see console)`, 'err'); }
+            break;
+          }
+        }
+        delBtn.textContent = '🗑 Delete selected';
+        updateCount();
       };
 
       search.addEventListener('input', renderChannels);
@@ -1136,14 +1167,35 @@
           confirm: true,
         }) });
         if (rr.data && rr.data.ok) {
-          toast(`Deleted ${rr.data.removedChannels} channel(s), ${rr.data.removedCategories} category(ies)`, 'ok');
-          if (rr.data.errors && rr.data.errors.length) { console.warn('Discord delete errors:', rr.data.errors); toast(`${rr.data.errors.length} item(s) could not be deleted (see console)`, 'err'); }
-        } else {
-          toast((rr.data && rr.data.error) || 'Delete failed', 'err');
+          toast(`Deleting ${rr.data.channels} channel(s) and ${rr.data.categories} category(ies) in the background…`, 'ok');
+          selChannels.clear(); selCategories.clear();
+          delBtn.textContent = 'Deleting…';
+          watchDelete();
+          return;
         }
-        selChannels.clear(); selCategories.clear();
+        toast((rr.data && rr.data.error) || 'Delete failed', 'err');
         delBtn.textContent = '🗑 Delete selected';
         load();
+      });
+
+      staleBtn.addEventListener('click', async () => {
+        staleBtn.disabled = true;
+        try {
+          const r = await adminFetch('/api/setup/discord/stale');
+          if (!r.data || !r.data.ok) { toast((r.data && r.data.error) || 'Could not check for stale channels', 'err'); return; }
+          const chans = r.data.channels || [];
+          const cats = r.data.categories || [];
+          if (!chans.length && !cats.length) { toast('No stale channels: every talkgroup channel matches your talkgroup list', 'ok'); return; }
+          selChannels.clear(); selCategories.clear();
+          chans.forEach((ch) => selChannels.add(ch.id));
+          cats.forEach((cat) => selCategories.add(cat.id));
+          search.value = '';
+          catFilter.value = '__selected__';
+          renderAll();
+          toast(`Selected ${chans.length} stale channel(s)${cats.length ? ` and ${cats.length} now-unused category(ies)` : ''}; review, then Delete selected`, 'ok');
+        } finally {
+          staleBtn.disabled = false;
+        }
       });
 
       cleanupBtn.addEventListener('click', async () => {
@@ -1156,7 +1208,8 @@
         load();
       });
 
-      load();
+      // Resume watching if a delete is still running (e.g. after a page reload).
+      load().then((data) => { if (data && data.deleteJob && data.deleteJob.running) watchDelete(); });
     },
   };
 

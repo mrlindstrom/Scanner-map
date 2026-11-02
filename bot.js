@@ -6608,7 +6608,7 @@ app.get('/internal/discord/channels', (req, res) => {
     .values())
     .sort((a, b) => a.name.localeCompare(b.name));
 
-  res.json({ ok: true, guild: guild.name, channels, categories });
+  res.json({ ok: true, guild: guild.name, channels, categories, deleteJob: discordDeleteJob });
 });
 
 // Bulk-delete selected channels and/or categories (rate-limit aware). When a
@@ -6651,20 +6651,34 @@ app.post('/internal/discord/delete', express.json(), async (req, res) => {
     });
   }
 
+  if (discordDeleteJob && discordDeleteJob.running) {
+    return res.json({ ok: false, error: 'A delete is already running; wait for it to finish.' });
+  }
+
+  // Deleting runs in the background: at Discord's rate limit, a few dozen
+  // channels outlasts the Settings proxy's (and Cloudflare's) request timeout.
+  // The page polls /internal/discord/channels, which reports this job.
+  const job = {
+    running: true,
+    totalChannels: channelTargets.length,
+    totalCategories: categoryTargets.length,
+    removedChannels: 0,
+    removedCategories: 0,
+    errors: [],
+    startedAt: Date.now(),
+    finishedAt: null,
+  };
+  discordDeleteJob = job;
+  res.json({ ok: true, started: true, channels: job.totalChannels, categories: job.totalCategories });
+
   try {
-    let removedChannels = 0;
-    let removedCategories = 0;
-    const errors = [];
     for (const ch of channelTargets) {
       try {
-        for (const key of Array.from(channelCache.keys())) {
-          if (channelCache.get(key)?.id === ch.id) channelCache.delete(key);
-        }
-        messageCache.delete(ch.id);
+        forgetDiscordChannel(ch);
         await ch.delete('Deleted via Settings → Discord Tools');
-        removedChannels += 1;
+        job.removedChannels += 1;
         await new Promise((r) => setTimeout(r, 600)); // rate-limit friendly
-      } catch (e) { errors.push(`#${ch.name}: ${e.message}`); }
+      } catch (e) { job.errors.push(`#${ch.name}: ${e.message}`); }
     }
     for (const cat of categoryTargets) {
       try {
@@ -6672,16 +6686,77 @@ app.post('/internal/discord/delete', express.json(), async (req, res) => {
           if (categoryCache.get(key)?.id === cat.id) categoryCache.delete(key);
         }
         await cat.delete('Deleted via Settings → Discord Tools');
-        removedCategories += 1;
+        job.removedCategories += 1;
         await new Promise((r) => setTimeout(r, 600));
-      } catch (e) { errors.push(`category ${cat.name}: ${e.message}`); }
+      } catch (e) { job.errors.push(`category ${cat.name}: ${e.message}`); }
     }
-    logger.info(`[discord] deleted ${removedChannels} channel(s) and ${removedCategories} category(ies)`);
-    res.json({ ok: true, removedChannels, removedCategories, errors });
+    logger.info(`[discord] deleted ${job.removedChannels} channel(s) and ${job.removedCategories} category(ies)`
+      + (job.errors.length ? `; ${job.errors.length} failed: ${job.errors.slice(0, 5).join('; ')}` : ''));
   } catch (e) {
+    job.errors.push(e.message);
     logger.error(`[discord] delete failed: ${e.message}`);
-    res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    job.running = false;
+    job.finishedAt = Date.now();
   }
+});
+
+let discordDeleteJob = null;
+
+// Drop a channel from the bot's lookup caches before deleting it, so the next
+// call for that talkgroup creates a fresh channel instead of posting to a dead one.
+function forgetDiscordChannel(ch) {
+  for (const key of Array.from(channelCache.keys())) {
+    if (channelCache.get(key)?.id === ch.id) channelCache.delete(key);
+  }
+  messageCache.delete(ch.id);
+}
+
+// Talkgroup channels the bot made that no longer match the talkgroup list:
+// a channel is current only when its name is what a talkgroup's name turns into
+// AND it sits in that talkgroup's category. Only channels with the bot's
+// "Transcriptions for …" topic are considered, so dispatch-summary, alert and
+// human-made channels are never touched. Categories are listed only when every
+// channel in them is stale and no talkgroup uses that category name.
+app.get('/internal/discord/stale', (req, res) => {
+  if (!isLoopback(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
+  if (!discordClientReady) return res.json({ ok: false, error: 'Discord not connected' });
+  const guild = discordGuild();
+  if (!guild) return res.json({ ok: false, error: 'No guild' });
+
+  db.all('SELECT alpha_tag, county FROM talk_groups', (err, rows) => {
+    if (err) return res.json({ ok: false, error: err.message });
+    const norm = (s) => String(s || '').trim().toLowerCase();
+    const expected = new Set();
+    const expectedCats = new Set();
+    for (const r of rows) {
+      const cat = norm(r.county || 'Uncategorized');
+      expectedCats.add(cat);
+      if (r.alpha_tag) expected.add(`${cat}\n${getChannelName(r.alpha_tag)}`);
+    }
+
+    const isTalkgroupChannel = (ch) => ch.type === ChannelType.GuildText
+      && String(ch.topic || '').startsWith('Transcriptions for ');
+    const stale = [];
+    for (const ch of guild.channels.cache.values()) {
+      if (!isTalkgroupChannel(ch)) continue;
+      const cat = ch.parent ? norm(ch.parent.name) : '';
+      if (!expected.has(`${cat}\n${ch.name}`)) {
+        stale.push({ id: ch.id, name: ch.name, category: ch.parent ? ch.parent.name : null, parentId: ch.parentId || null });
+      }
+    }
+
+    const staleIds = new Set(stale.map((s) => s.id));
+    const categories = [];
+    for (const cat of guild.channels.cache.values()) {
+      if (cat.type !== ChannelType.GuildCategory || expectedCats.has(norm(cat.name))) continue;
+      const kids = guild.channels.cache.filter((ch) => ch.parentId === cat.id);
+      if (kids.size > 0 && kids.every((ch) => staleIds.has(ch.id))) categories.push({ id: cat.id, name: cat.name });
+    }
+
+    stale.sort((a, b) => (a.category || '').localeCompare(b.category || '') || a.name.localeCompare(b.name));
+    res.json({ ok: true, talkgroups: rows.length, channels: stale, categories });
+  });
 });
 
 // Delete empty/orphaned talkgroup channels (those with no recent messages).

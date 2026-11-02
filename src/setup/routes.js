@@ -550,6 +550,7 @@ function mountSetup(app, deps = {}) {
       deleteCategoryChildren: !(req.body && req.body.deleteCategoryChildren === false),
       confirm: !!(req.body && req.body.confirm),
     })));
+  app.get('/api/setup/discord/stale', async (req, res) => res.json(await botProxy('/internal/discord/stale')));
   app.post('/api/setup/discord/cleanup-empty', async (req, res) =>
     res.json(await botProxy('/internal/discord/cleanup-empty', 'POST', { confirm: !!(req.body && req.body.confirm) })));
 
