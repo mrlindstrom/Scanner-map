@@ -81,11 +81,11 @@
     return f;
   }
 
-  function toggleField(key, label, hint) {
+  function toggleField(key, label, hint, def = 'false') {
     const f = el('div', { class: 'field' });
     const wrap = el('div', { class: 'switch' });
     const cb = el('input', { type: 'checkbox' });
-    cb.checked = String(get(key)).toLowerCase() === 'true';
+    cb.checked = String(get(key) || def).toLowerCase() === 'true';
     cb.addEventListener('change', () => { set(key, cb.checked ? 'true' : 'false'); renderStep(); });
     wrap.appendChild(cb);
     wrap.appendChild(el('label', { style: 'margin:0' }, label));
@@ -474,6 +474,8 @@
         if (String(get('ENABLE_SUMMARY_TALK_GROUPS')).toLowerCase() === 'true') {
           talkgroupMultiSelect(c, 'SUMMARY_TALK_GROUPS');
         }
+        c.appendChild(toggleField('SUMMARY_ENRICH', 'Check each incident against nearby radio traffic',
+          'After the summary posts, the AI re-reads the calls around each incident (same talkgroup, same street) and edits it with a corrected severity, status and units. Catches misheard words such as a “shooting” that was not one.', 'true'));
       },
     },
 

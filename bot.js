@@ -143,6 +143,7 @@ const streetMatching = require('./src/geocoding/streets');
 // Skip the AI for calls that can't contain a location (no number, street or place word)
 let ADDRESS_PREFILTER_ENABLED = String(process.env.ADDRESS_PREFILTER ?? 'true').toLowerCase() !== 'false';
 const summaryIncidents = require('./src/summary/incidents');
+const summaryEnrich = require('./src/summary/enrich');
 const audioPreprocess = require('./src/transcription/audioPreprocess');
 const hallucinationFilter = require('./src/transcription/hallucinationFilter');
 const transcriptCorrections = require('./src/transcription/corrections');
@@ -4968,6 +4969,24 @@ async function getOrCreateSummaryChannel(guild) {
   return channel;
 }
 
+// SQL (an AND clause on alias t) limiting the summary to SUMMARY_TALK_GROUPS.
+// "system:id" entries match that system only, so a school talkgroup that shares
+// an id with a dispatch one stays out; a bare id matches it on every system.
+function summaryTalkGroupFilter() {
+  if (!IS_SUMMARY_TALK_GROUPS_ENABLED || !SUMMARY_TALK_GROUPS.length) return { sql: '', params: [] };
+  const bare = [];
+  const pairs = [];
+  for (const entry of SUMMARY_TALK_GROUPS) {
+    const i = entry.lastIndexOf(':');
+    if (i > 0) pairs.push([entry.slice(0, i).trim(), entry.slice(i + 1).trim()]);
+    else bare.push(entry);
+  }
+  const parts = [];
+  if (bare.length) parts.push(`t.talk_group_id IN (${bare.map(() => '?').join(',')})`);
+  for (let k = 0; k < pairs.length; k++) parts.push("(COALESCE(t.system,'') = ? AND t.talk_group_id = ?)");
+  return { sql: ` AND (${parts.join(' OR ')})`, params: [...bare, ...pairs.flat()] };
+}
+
 // Function to fetch recent transcriptions from the database
 function getRecentTranscriptions() {
   return new Promise((resolve, reject) => {
@@ -4980,19 +4999,13 @@ function getRecentTranscriptions() {
     // Add some debug output
     logger.info(`LOOKBACK_PERIOD in milliseconds: ${LOOKBACK_PERIOD}`);
 
-    // Optionally restrict the AI summary to specific talkgroups. We strip any
-    // "system:" prefix here and match on the bare id (summary is descriptive, so
-    // cross-system id overlap is acceptable and keeps the query simple).
-    const summaryParams = [thirtyMinutesAgoUnix];
-    let summaryFilterSql = '';
-    if (IS_SUMMARY_TALK_GROUPS_ENABLED && SUMMARY_TALK_GROUPS.length) {
-      const ids = SUMMARY_TALK_GROUPS.map((e) => (e.includes(':') ? e.split(':').pop() : e));
-      summaryFilterSql = ` AND t.talk_group_id IN (${ids.map(() => '?').join(',')})`;
-      summaryParams.push(...ids);
-    }
+    // Optionally restrict the AI summary to specific talkgroups
+    const summaryFilter = summaryTalkGroupFilter();
+    const summaryFilterSql = summaryFilter.sql;
+    const summaryParams = [thirtyMinutesAgoUnix, ...summaryFilter.params];
 
     db.all(
-      `SELECT t.id, t.talk_group_id, t.timestamp, t.transcription, t.address, t.lat, t.lon, t.category,
+      `SELECT t.id, t.talk_group_id, t.system, t.timestamp, t.transcription, t.address, t.lat, t.lon, t.category,
               COALESCE(
                 (SELECT alpha_tag FROM talk_groups tg WHERE tg.id = t.talk_group_id AND tg.system = COALESCE(t.system,'') LIMIT 1),
                 (SELECT alpha_tag FROM talk_groups tg WHERE tg.id = t.talk_group_id AND tg.system = '' LIMIT 1),
@@ -5176,7 +5189,7 @@ function summaryTimeLabel(ts) {
 // One JSON completion from the configured provider. Ollama uses the same model
 // and num_ctx (OLLAMA_NUM_CTX) as Scanner Map's other requests, so the loaded model is reused
 // rather than reloaded.
-async function summaryAiCompletion(prompt) {
+async function summaryAiCompletion(prompt, numPredict = 1500) {
   // Lowest priority in the shared AI queue: live address extraction goes first.
   const queueOpts = { label: 'Summary', timeoutMs: SUMMARY_AI_TIMEOUT_MS, priority: 'low' };
   try {
@@ -5209,7 +5222,7 @@ async function summaryAiCompletion(prompt) {
         think: false,
         // num_ctx must match Scanner Map's other Ollama requests or the model reloads.
         // Ollama serves one request at a time, so cap the reply to keep address extraction from waiting long.
-        options: { num_ctx: llmQueue.ollamaNumCtx(), temperature: 0.2, num_predict: 1500 },
+        options: { num_ctx: llmQueue.ollamaNumCtx(), temperature: 0.2, num_predict: numPredict },
       }),
     }, queueOpts);
     if (!response.ok) throw new Error(`Ollama API error ${response.status}`);
@@ -5358,6 +5371,171 @@ function saveSummaryToJson(summary, highlights) {
   }
 }
 
+// ---- Summary incident checks (src/summary/enrich.js)
+let summaryRunSeq = 0;               // a newer run abandons an older run's checks
+const summaryEnrichCache = new Map(); // same incident + same nearby calls -> same answer
+
+function summaryEnrichEnabled() {
+  return String(process.env.SUMMARY_ENRICH ?? 'true').toLowerCase() !== 'false';
+}
+
+function summaryDbAll(sql, params) {
+  return new Promise((resolve, reject) => db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || []))));
+}
+
+function sortIncidents(incidents) {
+  return incidents.sort((a, b) => summaryIncidents.SEVERITIES.indexOf(a.severity) - summaryIncidents.SEVERITIES.indexOf(b.severity)
+    || Math.max(...b.calls.map((c) => c.timestamp)) - Math.max(...a.calls.map((c) => c.timestamp)));
+}
+
+async function enrichSummary(summary, runSeq, windowStart, windowEnd) {
+  const started = Date.now();
+  const filter = summaryTalkGroupFilter();
+  const kept = [];
+  let changed = 0, dropped = 0, failed = 0, cached = 0;
+  for (const incident of summary.incidents) {
+    if (runSeq !== summaryRunSeq) return null; // a newer summary replaced this one
+    try {
+      const context = await summaryEnrich.buildContext(summaryDbAll, incident, { windowStart, windowEnd, filter });
+      const key = `${[...context.coreIds].sort().join(',')}|${context.calls.map((c) => c.id).join(',')}`;
+      const hit = summaryEnrichCache.get(key);
+      const reply = hit ? hit.reply : await summaryAiCompletion(summaryEnrich.buildPrompt(incident, context, summaryTimeLabel), 1000);
+      if (hit) cached++;
+      const next = summaryEnrich.applyReply(reply, incident, context);
+      summaryEnrichCache.set(key, { reply, at: Date.now() });
+      if (!next) {
+        dropped++;
+        logger.info(`Summary: dropped "${incident.title}" after checking nearby traffic`);
+        continue;
+      }
+      if (next.severityChange) {
+        changed++;
+        logger.info(`Summary: "${incident.title}" ${incident.severity} -> ${next.severity} (${next.severityChange.reason || 'no reason given'})`);
+      }
+      kept.push(next);
+    } catch (err) {
+      failed++;
+      logger.warn(`Summary: could not check "${incident.title}" (${err.message}); keeping the first-pass version`);
+      kept.push(incident);
+    }
+  }
+  for (const [k, v] of summaryEnrichCache) if (Date.now() - v.at > 3 * 3600 * 1000) summaryEnrichCache.delete(k);
+  logger.info(`Summary: checked ${summary.incidents.length} incident(s) against nearby traffic in ${((Date.now() - started) / 1000).toFixed(1)}s` +
+    ` (${changed} re-rated, ${dropped} dropped, ${failed} failed, ${cached} cached)`);
+
+  const incidents = summaryEnrich.mergeDuplicates(sortIncidents(kept));
+  const merged = kept.length - incidents.length;
+  if (merged) logger.info(`Summary: merged ${merged} duplicate incident(s)`);
+  let text = summary.summary;
+  if ((changed || dropped || merged) && runSeq === summaryRunSeq) {
+    try {
+      text = await rewriteSummaryText(incidents);
+    } catch (err) {
+      logger.warn(`Summary: could not rewrite the overview (${err.message})`);
+    }
+  }
+  return { ...summary, summary: text, incidents, highlights: summaryIncidents.toHighlights(incidents), enrich: { changed, dropped, failed } };
+}
+
+// The first pass wrote the overview before the checks; rewrite it from the checked incidents
+async function rewriteSummaryText(incidents) {
+  const timeframe = `${LOOKBACK_HOURS} ${LOOKBACK_HOURS === 1 ? 'hour' : 'hours'}`;
+  if (!incidents.length) return `Nothing notable in the past ${timeframe} once the surrounding radio traffic was checked.`;
+  const list = incidents.map((i) => `- ${i.severity} ${i.title}${i.location ? ` (${i.location})` : ''}: ${i.description}`).join('\n');
+  const reply = await summaryAiCompletion(`You are a 911 dispatch supervisor. Write a 2-3 sentence overview of the past ${timeframe} of radio traffic for on-duty staff, based only on these incidents (most severe first). Name locations. Do not add anything that is not listed.
+
+${list}
+
+Return ONLY this JSON: {"summary": "..."}`, 300);
+  const out = String(summaryIncidents.extractJson(reply).summary || '').replace(/\s+/g, ' ').trim();
+  if (!out) throw new Error('empty overview');
+  return out.slice(0, 1000);
+}
+
+// phase: 'checking' while incidents are being checked, 'checked' after
+function buildSummaryEmbed(summary, timeSpanInfo, transmissionCount, phase) {
+  const incidents = summary.incidents || [];
+  const counts = summaryIncidents.SEVERITIES
+    .map((sev) => [sev, incidents.filter((i) => i.severity === sev).length])
+    .filter(([, n]) => n > 0)
+    .map(([sev, n]) => `${summaryIncidents.SEVERITY_ICON[sev]} ${n} ${sev.toLowerCase()}`);
+  const statsLine = `${counts.length ? counts.join(' · ') + ' · ' : ''}from ${summary.stats ? summary.stats.total : transmissionCount} transmissions`;
+  const worst = incidents.length ? incidents[0].severity : 'NONE';
+  const footer = summary.source === 'fallback'
+    ? 'Updates every 10 minutes • AI unavailable, ranked by keyword scoring'
+    : phase === 'checking'
+      ? 'Updates every 10 minutes • Ranked by AI • Checking each incident against nearby radio traffic…'
+      : phase === 'checked'
+        ? 'Updates every 10 minutes • Ranked by AI and checked against nearby radio traffic'
+        : 'Updates every 10 minutes • Ranked by AI from pre-scored calls';
+
+  const embed = new EmbedBuilder()
+    .setTitle(`📻 Dispatch Summary - Past ${LOOKBACK_HOURS} ${LOOKBACK_HOURS === 1 ? 'Hour' : 'Hours'} ${timeSpanInfo}`.slice(0, 256))
+    .setDescription(`${summary.summary}\n\n${statsLine}`.slice(0, 1500))
+    .setTimestamp()
+    .setColor(summaryIncidents.SEVERITY_COLOR[worst])
+    .setFooter({ text: footer });
+
+  // One field per incident, most severe first. Embeds are capped at 6000 characters overall.
+  let budget = 6000 - 300 - (embed.data.title || '').length - (embed.data.description || '').length - footer.length;
+  for (const inc of incidents) {
+    const lead = inc.calls[0];
+    const name = `${summaryIncidents.SEVERITY_ICON[inc.severity]} ${inc.title}${inc.location ? ` — ${inc.location}` : ''}`.slice(0, 256);
+    const facts = [];
+    if (inc.status) facts.push(`Status: ${inc.status}`);
+    if (inc.units && inc.units.length) facts.push(`Units: ${inc.units.join(', ')}`);
+    const lowered = inc.severityChange
+      && summaryIncidents.SEVERITIES.indexOf(inc.severity) > summaryIncidents.SEVERITIES.indexOf(inc.severityChange.from);
+    const change = inc.severityChange
+      ? `${lowered ? '⬇️' : '⬆️'} Was ${inc.severityChange.from.toLowerCase()}${inc.severityChange.reason ? `: ${inc.severityChange.reason}` : ''}`
+      : '';
+    const links = [`<t:${Math.floor(lead.timestamp)}:t>`, lead.talk_group || lead.talk_group_name || `TG ${lead.talk_group_id}`, `[▶️ Audio](${buildAudioUrl(lead.id)})`];
+    const messageUrl = callMessageUrls.get(String(lead.id));
+    if (messageUrl) links.push(`[💬 Message](${messageUrl.url})`);
+    if (lead.lat != null && lead.lon != null) links.push(`[🗺️ Map](${scannerMapCallUrl(lead.id)})`);
+    if (inc.calls.length > 1) links.push(`+${inc.calls.length - 1} related call${inc.calls.length === 2 ? '' : 's'}`);
+    const value = [inc.description, facts.join(' · '), change, links.join(' · ')].filter(Boolean).join('\n').slice(0, 1024);
+    if (name.length + value.length > budget) break;
+    budget -= name.length + value.length;
+    embed.addFields({ name, value, inline: false });
+  }
+  if (incidents.length === 0) {
+    embed.addFields({
+      name: '✅ Nothing notable',
+      value: `No incidents rated medium or higher in the past ${LOOKBACK_HOURS === 1 ? 'hour' : `${LOOKBACK_HOURS} hours`}.`,
+      inline: false,
+    });
+  }
+  return embed;
+}
+
+async function postSummaryEmbed(embed) {
+  const row = new ActionRowBuilder().addComponents(new ButtonBuilder()
+    .setCustomId('refresh_summary')
+    .setLabel('🔄 Refresh Now')
+    .setStyle(ButtonStyle.Secondary));
+  if (summaryMessage) {
+    try {
+      await summaryMessage.edit({ embeds: [embed], components: [row] });
+      logger.info('Updated summary embed message.');
+      return;
+    } catch (err) {
+      logger.error('Error updating summary message, will create new one:', err);
+      summaryMessage = await summaryChannel.send({ embeds: [embed], components: [row] });
+      return;
+    }
+  }
+  const messages = await summaryChannel.messages.fetch({ limit: 1 });
+  if (messages.size > 0 && messages.first().author.id === client.user.id) {
+    summaryMessage = messages.first();
+    await summaryMessage.edit({ embeds: [embed], components: [row] });
+    logger.info('Updated existing summary message found in channel.');
+  } else {
+    summaryMessage = await summaryChannel.send({ embeds: [embed], components: [row] });
+    logger.info('Created new summary embed message.');
+  }
+}
+
 // Function to create or update the summary embed
 async function updateSummaryEmbed() {
   try {
@@ -5410,82 +5588,28 @@ async function updateSummaryEmbed() {
       };
     }
 
-    // Save the summary to JSON file for the website
+    const runSeq = ++summaryRunSeq;
+    const enrichable = summary.source === 'ai' && (summary.incidents || []).length > 0 && summaryEnrichEnabled();
     saveSummaryToJson(summary.summary, summary.highlights);
-
-    const incidents = summary.incidents || [];
-    const counts = summaryIncidents.SEVERITIES
-      .map((sev) => [sev, incidents.filter((i) => i.severity === sev).length])
-      .filter(([, n]) => n > 0)
-      .map(([sev, n]) => `${summaryIncidents.SEVERITY_ICON[sev]} ${n} ${sev.toLowerCase()}`);
-    const statsLine = `${counts.length ? counts.join(' · ') + ' · ' : ''}from ${summary.stats ? summary.stats.total : transcriptions.length} transmissions`;
-    const worst = incidents.length ? incidents[0].severity : 'NONE';
-
-    const embed = new EmbedBuilder()
-      .setTitle(`📻 Dispatch Summary - Past ${LOOKBACK_HOURS} ${LOOKBACK_HOURS === 1 ? 'Hour' : 'Hours'} ${timeSpanInfo}`.slice(0, 256))
-      .setDescription(`${summary.summary}\n\n${statsLine}`.slice(0, 1500))
-      .setTimestamp()
-      .setColor(summaryIncidents.SEVERITY_COLOR[worst])
-      .setFooter({ text: summary.source === 'fallback'
-        ? 'Updates every 10 minutes • AI unavailable, ranked by keyword scoring'
-        : 'Updates every 10 minutes • Ranked by AI from pre-scored calls' });
-
-    // One field per incident, most severe first. Embeds are capped at 6000 characters overall.
-    let budget = 6000 - 300 - (embed.data.title || '').length - (embed.data.description || '').length;
-    for (const inc of incidents) {
-      const lead = inc.calls[0];
-      const name = `${summaryIncidents.SEVERITY_ICON[inc.severity]} ${inc.title}${inc.location ? ` — ${inc.location}` : ''}`.slice(0, 256);
-      const links = [`<t:${Math.floor(lead.timestamp)}:t>`, lead.talk_group || `TG ${lead.talk_group_id}`, `[▶️ Audio](${buildAudioUrl(lead.id)})`];
-      const messageUrl = callMessageUrls.get(String(lead.id));
-      if (messageUrl) links.push(`[💬 Message](${messageUrl.url})`);
-      if (lead.lat != null && lead.lon != null) links.push(`[🗺️ Map](${scannerMapCallUrl(lead.id)})`);
-      if (inc.calls.length > 1) links.push(`+${inc.calls.length - 1} related call${inc.calls.length === 2 ? '' : 's'}`);
-      const value = `${inc.description}\n${links.join(' · ')}`.slice(0, 1024);
-      if (name.length + value.length > budget) break;
-      budget -= name.length + value.length;
-      embed.addFields({ name, value, inline: false });
-    }
-    if (incidents.length === 0) {
-      embed.addFields({
-        name: '✅ Nothing notable',
-        value: `No incidents rated medium or higher in the past ${LOOKBACK_HOURS === 1 ? 'hour' : `${LOOKBACK_HOURS} hours`}.`,
-        inline: false,
-      });
-    }
-
-    // Create refresh button
-    const refreshButton = new ButtonBuilder()
-      .setCustomId('refresh_summary')
-      .setLabel('🔄 Refresh Now')
-      .setStyle(ButtonStyle.Secondary);
-    
-    const row = new ActionRowBuilder().addComponents(refreshButton);
-    
-    // Update or send the message
-    if (summaryMessage) {
-      try {
-        await summaryMessage.edit({ embeds: [embed], components: [row] });
-        logger.info('Updated summary embed message.');
-      } catch (err) {
-        logger.error('Error updating summary message, will create new one:', err);
-        summaryMessage = await summaryChannel.send({ embeds: [embed], components: [row] });
-      }
-    } else {
-      // Find the most recent message in the channel
-      const messages = await summaryChannel.messages.fetch({ limit: 1 });
-      if (messages.size > 0 && messages.first().author.id === client.user.id) {
-        summaryMessage = messages.first();
-        await summaryMessage.edit({ embeds: [embed], components: [row] });
-        logger.info('Updated existing summary message found in channel.');
-      } else {
-        // Create a new message
-        summaryMessage = await summaryChannel.send({ embeds: [embed], components: [row] });
-        logger.info('Created new summary embed message.');
-      }
-    }
-    
+    await postSummaryEmbed(buildSummaryEmbed(summary, timeSpanInfo, transcriptions.length, enrichable ? 'checking' : null));
     lastSummaryUpdate = Date.now();
-    
+
+    // Then check each incident against the traffic around it and edit the message.
+    // Runs in the background at low AI priority so it never holds up the next run.
+    if (enrichable) {
+      const windowEnd = Math.floor(Date.now() / 1000);
+      const windowStart = transcriptions.length
+        ? Math.min(...transcriptions.map((t) => t.timestamp))
+        : windowEnd - LOOKBACK_HOURS * 3600;
+      enrichSummary(summary, runSeq, windowStart, windowEnd)
+        .then(async (enriched) => {
+          if (!enriched || runSeq !== summaryRunSeq) return;
+          saveSummaryToJson(enriched.summary, enriched.highlights);
+          await postSummaryEmbed(buildSummaryEmbed(enriched, timeSpanInfo, transcriptions.length, 'checked'));
+        })
+        .catch((err) => logger.error(`Summary: checking incidents failed: ${err.message}`));
+    }
+
   } catch (error) {
     logger.error('Error updating summary embed:', error);
   }

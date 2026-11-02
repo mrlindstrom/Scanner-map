@@ -84,6 +84,8 @@ The ${lines.length} calls below were pre-filtered from ${o.totalCalls} transmiss
 
 Some calls carry tags: call types matched by keyword in the transcript, with the severity that kind of call usually is. Use them as hints for grouping and rating, not as the answer: a tag can come from a misheard word, a question, or a mention of an earlier call, so rate each incident on what its calls actually say.
 
+The dispatcher's stated call type (for example "outside fire, small" or "auto-pedestrian, EMS refused") is the best evidence of what an incident is; weigh it over one odd phrase, which may be misheard ("we were trapped to comm 16" means units moved to radio channel 16, not that anyone is trapped).
+
 Steps:
 1. Group calls about the same incident into one incident: same address, the same units, or a dispatch followed by unit updates and outcomes.
 2. Rate each incident:

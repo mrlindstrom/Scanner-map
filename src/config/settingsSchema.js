@@ -183,6 +183,7 @@ add('summary', 'SUMMARY_LOOKBACK_HOURS', 'Summary covers (hours)', 'number', '1'
 add('summary', 'ASK_AI_LOOKBACK_HOURS', 'Ask AI covers (hours)', 'number', '8', '', { guided: 'AI Features' });
 add('summary', 'ENABLE_SUMMARY_TALK_GROUPS', 'Only summarize some talkgroups', 'bool', 'false', '', { guided: 'AI Features' });
 add('summary', 'SUMMARY_TALK_GROUPS', 'Summary talkgroups', 'list', '', 'IDs or system:id.', { guided: 'AI Features' });
+add('summary', 'SUMMARY_ENRICH', 'Check incidents against nearby traffic', 'bool', 'true', 'After posting, re-read the calls around each incident and correct its severity, status and description.', { guided: 'AI Features' });
 add('summary', 'SUMMARY_MAX_INCIDENTS', 'Incidents shown', 'number', '6', '');
 add('summary', 'SUMMARY_MAX_CANDIDATES', 'Calls sent to the AI', 'number', '', 'Blank = as many as fit the Ollama context size (40 at 8192).');
 add('summary', 'SUMMARY_MIN_SCORE', 'Minimum score', 'number', '2.5', '');
