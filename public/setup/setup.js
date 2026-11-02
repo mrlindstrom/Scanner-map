@@ -982,15 +982,115 @@
     title: 'Discord Tools',
     render(c) {
       c.appendChild(el('h1', {}, 'Discord Tools'));
-      c.appendChild(el('p', { class: 'lead' }, 'Filter, sort, and select the bot\'s channels and categories to delete.'));
-      c.appendChild(infoBox(
-        'Tick the boxes next to channels and/or categories, then <b>Delete selected</b>. Deleting a category also deletes the ' +
-        'channels inside it (toggle below). Deletions are <b>permanent</b> and run rate-limit aware.', 'warn'));
+      c.appendChild(el('p', { class: 'lead' }, 'Keep channels in order, and filter, sort and select the bot\'s channels and categories to delete.'));
 
       let allChannels = [];
       let allCategories = [];
       const selChannels = new Set();
       const selCategories = new Set();
+
+      // ---- Channel order: auto A→Z, sort now, pinned categories ----
+      c.appendChild(el('h2', { style: 'margin:14px 0 4px' }, 'Channel order'));
+      const sortToggle = el('input', { type: 'checkbox' });
+      sortToggle.checked = String(get('DISCORD_SORT_CHANNELS', 'true')).toLowerCase() !== 'false';
+      const sortLbl = el('label', { style: 'display:flex;align-items:center;gap:8px;margin:6px 0' });
+      sortLbl.appendChild(sortToggle);
+      sortLbl.appendChild(document.createTextNode(' Keep talkgroup channels A→Z in each category (re-sorts when a channel is added)'));
+      c.appendChild(sortLbl);
+      const sortRow = el('div', { class: 'tg-bulk' });
+      const sortNowBtn = el('button', { class: 'btn btn-sm', type: 'button' }, '🔤 Sort channels A→Z now');
+      sortRow.appendChild(sortNowBtn);
+      c.appendChild(sortRow);
+      c.appendChild(el('div', { class: 'hint' },
+        'Only the bot\'s talkgroup channels move; hand-made, alert and dispatch-summary channels keep their places. ' +
+        'Numbers sort naturally ("Krimmel 2" before "Krimmel 10").'));
+
+      c.appendChild(el('h3', { style: 'margin:12px 0 4px' }, 'Pinned categories'));
+      c.appendChild(el('div', { class: 'hint' },
+        'These categories stay at the top of the server, in this order. Every other category keeps its current order below them.'));
+      let pinned = String(get('DISCORD_PINNED_CATEGORIES', '')).split('|').map((s) => s.trim()).filter(Boolean);
+      const pinWrap = el('div', { class: 'tg-table-wrap' });
+      c.appendChild(pinWrap);
+      const pinAddRow = el('div', { class: 'tg-controls' });
+      const pinSelect = el('select');
+      const pinAddBtn = el('button', { class: 'btn btn-sm', type: 'button' }, '📌 Pin to top');
+      pinAddRow.appendChild(pinSelect); pinAddRow.appendChild(pinAddBtn);
+      c.appendChild(pinAddRow);
+
+      const saveSetting = async (key, value) => {
+        const r = await adminFetch('/api/setup/save', { method: 'POST', body: JSON.stringify({ [key]: value }) });
+        if (!r.data || !r.data.ok) { toast((r.data && r.data.error) || 'Save failed', 'err'); return false; }
+        set(key, value);
+        return true;
+      };
+
+      const savePinned = async () => {
+        const ok = await saveSetting('DISCORD_PINNED_CATEGORIES', pinned.length ? pinned.join('|') : null);
+        if (ok) toast(pinned.length ? 'Pinned order saved; Discord updates in a few seconds' : 'No pinned categories', 'ok');
+        renderPins();
+      };
+
+      const renderPins = () => {
+        pinWrap.innerHTML = '';
+        const existing = new Map(allCategories.map((cat) => [cat.name.trim().toLowerCase(), cat]));
+        if (!pinned.length) {
+          pinWrap.appendChild(el('div', { class: 'hint', style: 'padding:8px' }, 'No pinned categories.'));
+        } else {
+          const table = el('table');
+          table.innerHTML = '<thead><tr><th>#</th><th>Category</th><th></th></tr></thead>';
+          const tb = el('tbody');
+          pinned.forEach((name, i) => {
+            const tr = el('tr');
+            tr.appendChild(el('td', {}, String(i + 1)));
+            const nameTd = el('td');
+            nameTd.textContent = name;
+            if (allCategories.length && !existing.has(name.toLowerCase())) {
+              nameTd.appendChild(el('span', { class: 'hint' }, ' (not in Discord yet)'));
+            }
+            tr.appendChild(nameTd);
+            const act = el('td', { style: 'white-space:nowrap' });
+            const up = el('button', { class: 'btn btn-sm', type: 'button', title: 'Move up' }, '▲');
+            const down = el('button', { class: 'btn btn-sm', type: 'button', title: 'Move down' }, '▼');
+            const rm = el('button', { class: 'btn btn-sm', type: 'button', title: 'Unpin' }, '✕');
+            up.disabled = i === 0;
+            down.disabled = i === pinned.length - 1;
+            up.addEventListener('click', () => { [pinned[i - 1], pinned[i]] = [pinned[i], pinned[i - 1]]; savePinned(); });
+            down.addEventListener('click', () => { [pinned[i + 1], pinned[i]] = [pinned[i], pinned[i + 1]]; savePinned(); });
+            rm.addEventListener('click', () => { pinned = pinned.filter((_, j) => j !== i); savePinned(); });
+            act.appendChild(up); act.appendChild(down); act.appendChild(rm);
+            tr.appendChild(act);
+            tb.appendChild(tr);
+          });
+          table.appendChild(tb);
+          pinWrap.appendChild(table);
+        }
+        // Categories that aren't pinned yet, in their Discord order
+        const pinnedSet = new Set(pinned.map((n) => n.toLowerCase()));
+        pinSelect.innerHTML = '';
+        const ph = el('option', { value: '' }); ph.textContent = 'Choose a category to pin…'; pinSelect.appendChild(ph);
+        allCategories.slice().sort((a, b) => (a.position || 0) - (b.position || 0))
+          .filter((cat) => !pinnedSet.has(cat.name.trim().toLowerCase()))
+          .forEach((cat) => { const o = el('option', { value: cat.name }); o.textContent = cat.name; pinSelect.appendChild(o); });
+      };
+
+      pinAddBtn.addEventListener('click', () => {
+        const name = pinSelect.value;
+        if (!name) { toast('Choose a category first', 'err'); return; }
+        if (name.includes('|')) { toast('Category names with "|" can\'t be pinned', 'err'); return; }
+        pinned.push(name);
+        savePinned();
+      });
+
+      sortToggle.addEventListener('change', async () => {
+        const ok = await saveSetting('DISCORD_SORT_CHANNELS', sortToggle.checked ? 'true' : 'false');
+        if (ok) toast(sortToggle.checked ? 'Channels will be kept A→Z; sorting now' : 'Automatic sorting off', 'ok');
+        else sortToggle.checked = !sortToggle.checked;
+      });
+
+      c.appendChild(el('h2', { style: 'margin:18px 0 4px' }, 'Delete channels'));
+      c.appendChild(infoBox(
+        'Tick the boxes next to channels and/or categories, then <b>Delete selected</b>. Deleting a category also deletes the ' +
+        'channels inside it (toggle below). Deletions are <b>permanent</b> and run rate-limit aware.', 'warn'));
 
       // Filters / sort row
       const controls = el('div', { class: 'tg-controls' });
@@ -1101,7 +1201,7 @@
         table.appendChild(tb); wrap.appendChild(table);
       };
 
-      const renderAll = () => { renderCats(); renderChannels(); updateCount(); };
+      const renderAll = () => { renderPins(); renderCats(); renderChannels(); updateCount(); };
 
       const load = async () => {
         wrap.textContent = 'Loading channels…';
@@ -1176,6 +1276,30 @@
         toast((rr.data && rr.data.error) || 'Delete failed', 'err');
         delBtn.textContent = '🗑 Delete selected';
         load();
+      });
+
+      sortNowBtn.addEventListener('click', async () => {
+        sortNowBtn.disabled = true;
+        const r = await adminFetch('/api/setup/discord/sort', { method: 'POST', body: '{}' });
+        if (!r.data || !r.data.ok) {
+          toast((r.data && r.data.error) || 'Could not start sorting', 'err');
+          sortNowBtn.disabled = false;
+          return;
+        }
+        sortNowBtn.textContent = 'Sorting…';
+        toast('Sorting channels in the background…', 'ok');
+        for (let i = 0; i < 90; i++) { // up to ~6 minutes
+          await new Promise((res) => setTimeout(res, 4000));
+          const data = await load();
+          const job = data && data.sortJob;
+          if (job && !job.running) {
+            if (job.error) toast(`Sorting failed: ${job.error}`, 'err');
+            else toast(job.moved ? `Moved ${job.moved} channel(s) in ${job.categories} category(ies)` : 'Everything was already in order', 'ok');
+            break;
+          }
+        }
+        sortNowBtn.textContent = '🔤 Sort channels A→Z now';
+        sortNowBtn.disabled = false;
       });
 
       staleBtn.addEventListener('click', async () => {

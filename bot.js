@@ -137,6 +137,7 @@ const llmQueue = require('./src/ai/llmQueue');
 const { createCatchUp } = require('./src/ai/catchUp');
 const { audioUrl: buildAudioUrl, getPublicBaseUrl } = require('./src/utils/publicUrl');
 const callEmbeds = require('./src/discord/callEmbeds');
+const channelOrder = require('./src/discord/channelOrder');
 const summaryTriage = require('./src/summary/triage');
 const streetMatching = require('./src/geocoding/streets');
 // Skip the AI for calls that can't contain a location (no number, street or place word)
@@ -1191,6 +1192,12 @@ const client = new Client({
     IntentsBitField.Flags.MessageContent,
     IntentsBitField.Flags.GuildVoiceStates,
   ],
+});
+
+// Keeps talkgroup channels A→Z in each category and pinned categories on top
+const channelOrderer = channelOrder.createChannelOrderer({
+  getGuild: () => (client && client.guilds ? client.guilds.cache.first() : null),
+  logger,
 });
 
 // Global variables
@@ -5542,6 +5549,7 @@ function getOrCreateCategory(categoryName, callback) {
     );
     if (!category) {
       category = await guild.channels.create({ name: categoryName, type: ChannelType.GuildCategory });
+      channelOrderer.categoriesChanged(); // keep pinned categories above the new one
     }
     categoryCache.set(categoryName, category);
     return category;
@@ -5595,6 +5603,7 @@ function getOrCreateChannel(channelName, categoryId, callback) {
           },
         ],
       });
+      channelOrderer.channelAdded(categoryId); // re-sort the category A→Z
     }
     channelCache.set(cacheKey, channel);
     return channel;
@@ -6064,6 +6073,11 @@ client.once('clientReady', async () => {
   }
 
   const guild = client.guilds.cache.first(); // Adjust if needed
+
+  // Put channels in order once at startup (only moves what's out of place)
+  setTimeout(() => {
+    channelOrderer.sortAll().catch((e) => logger.warn(`[discord] startup channel sort failed: ${e.message}`));
+  }, 15000);
 
   // Set up the alert channel
   if (guild) {
@@ -6604,11 +6618,11 @@ app.get('/internal/discord/channels', (req, res) => {
   for (const ch of channels) if (ch.parentId) childCounts[ch.parentId] = (childCounts[ch.parentId] || 0) + 1;
   const categories = Array.from(guild.channels.cache
     .filter((ch) => ch.type === ChannelType.GuildCategory)
-    .map((ch) => ({ id: ch.id, name: ch.name, channelCount: childCounts[ch.id] || 0 }))
+    .map((ch) => ({ id: ch.id, name: ch.name, channelCount: childCounts[ch.id] || 0, position: ch.rawPosition != null ? ch.rawPosition : (ch.position || 0) }))
     .values())
     .sort((a, b) => a.name.localeCompare(b.name));
 
-  res.json({ ok: true, guild: guild.name, channels, categories, deleteJob: discordDeleteJob });
+  res.json({ ok: true, guild: guild.name, channels, categories, deleteJob: discordDeleteJob, sortJob: discordSortJob });
 });
 
 // Bulk-delete selected channels and/or categories (rate-limit aware). When a
@@ -6702,6 +6716,23 @@ app.post('/internal/discord/delete', express.json(), async (req, res) => {
 });
 
 let discordDeleteJob = null;
+let discordSortJob = null;
+
+// Sort every category's talkgroup channels A→Z and apply the pinned
+// categories now (the Settings button; works even with auto-sort off).
+// Runs in the background; /internal/discord/channels reports progress.
+app.post('/internal/discord/sort', express.json(), (req, res) => {
+  if (!isLoopback(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
+  if (!discordClientReady) return res.json({ ok: false, error: 'Discord not connected' });
+  if (discordSortJob && discordSortJob.running) return res.json({ ok: false, error: 'A sort is already running.' });
+  const job = { running: true, moved: 0, categories: 0, error: null, startedAt: Date.now(), finishedAt: null };
+  discordSortJob = job;
+  res.json({ ok: true, started: true });
+  channelOrderer.sortAll({ force: true })
+    .then((r) => { if (r) { job.moved = r.moved; job.categories = r.categories; } })
+    .catch((e) => { job.error = e.message; })
+    .finally(() => { job.running = false; job.finishedAt = Date.now(); });
+});
 
 // Drop a channel from the bot's lookup caches before deleting it, so the next
 // call for that talkgroup creates a fresh channel instead of posting to a dead one.
@@ -6875,6 +6906,13 @@ function applyLiveSettings(changed) {
       .then(() => client.login(DISCORD_TOKEN))
       .then(() => { discordClientReady = true; logger.info('Discord bot signed in with the new token.', { console: true }); })
       .catch((e) => logger.error(`Discord sign-in with the new token failed: ${e.message}`));
+  }
+  if (!IS_MAP_ONLY_MODE && discordClientReady) {
+    if (has((k) => k === 'DISCORD_SORT_CHANNELS') && channelOrder.sortEnabled()) {
+      channelOrderer.sortAll().catch(() => {});
+    } else if (has((k) => k === 'DISCORD_PINNED_CATEGORIES')) {
+      channelOrderer.categoriesChanged();
+    }
   }
   if (has((k) => settingsSchema.WEB_KEYS.has(k))) {
     restartWebserver().catch((e) => logger.error(`Web server restart failed: ${e.message}`));

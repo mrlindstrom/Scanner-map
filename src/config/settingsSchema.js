@@ -66,6 +66,8 @@ add('network', 'BOT_PORT', 'Upload port', 'number', '3306', 'Port SDRTrunk / Tru
 // ---- Discord
 add('discord', 'DISCORD_TOKEN', 'Bot token', 'secret', '', 'The bot signs in again with the new token.', { guided: 'Discord' });
 add('discord', 'CLIENT_ID', 'Application (client) ID', 'secret', '', 'Used to build the invite link.', { guided: 'Discord' });
+add('discord', 'DISCORD_SORT_CHANNELS', 'Keep channels A→Z', 'bool', 'true', 'Sort talkgroup channels alphabetically in each category whenever one is added. Hand-made channels keep their places. Off leaves the order alone (the Sort button in Discord Tools still works).', { guided: 'Discord Tools' });
+add('discord', 'DISCORD_PINNED_CATEGORIES', 'Pinned categories', 'pipe', '', 'Category names kept at the top of the server, in this order. Set them in Discord Tools.', { guided: 'Discord Tools' });
 
 // ---- Security
 add('security', 'ENABLE_AUTH', 'Require sign-in', 'bool', 'false', 'Password-protect the map.', { guided: 'Network & Auth' });
