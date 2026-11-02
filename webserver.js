@@ -261,6 +261,32 @@ if (authEnabled) {
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       )
     `);
+
+    // When each user last signed in (a new session) and was last active.
+    // Kept on the user because sessions are deleted when they expire or are
+    // evicted. Backfilled once from whatever sessions exist.
+    for (const col of ['last_login', 'last_seen']) {
+      db.run(`ALTER TABLE users ADD COLUMN ${col} DATETIME`, (err) => {
+        if (err && !/duplicate column/i.test(err.message)) console.error(`Could not add users.${col}:`, err.message);
+      });
+    }
+    db.run(`UPDATE users SET
+              last_login = (SELECT MAX(created_at) FROM sessions WHERE sessions.user_id = users.id),
+              last_seen = (SELECT MAX(last_activity) FROM sessions WHERE sessions.user_id = users.id)
+            WHERE last_login IS NULL AND last_seen IS NULL`, (err) => {
+      if (err) console.error('Could not backfill user sign-in times:', err.message);
+    });
+  });
+}
+
+// Record a sign-in, or activity at most once a minute per user.
+function touchUser(userId, isLogin) {
+  const sql = isLogin
+    ? 'UPDATE users SET last_login = CURRENT_TIMESTAMP, last_seen = CURRENT_TIMESTAMP WHERE id = ?'
+    : `UPDATE users SET last_seen = CURRENT_TIMESTAMP
+       WHERE id = ? AND (last_seen IS NULL OR last_seen < datetime('now', '-1 minute'))`;
+  db.run(sql, [userId], (err) => {
+    if (err) console.error('Could not record user activity:', err.message);
   });
 }
 
@@ -288,8 +314,9 @@ async function createSession(userId, req) {
        VALUES (?, ?, datetime(?), ?, ?)`,
       [userId, token, expiresAt.toISOString(), ipAddress, userAgent],
       function(err) {
-        if (err) reject(err);
-        else resolve({ token, expiresAt });
+        if (err) return reject(err);
+        touchUser(userId, true);
+        resolve({ token, expiresAt });
       }
     );
   });
@@ -329,6 +356,7 @@ function getOrCreateBasicSession(userId, req) {
     if (existing) {
       await dbRunAsync('UPDATE sessions SET last_activity = CURRENT_TIMESTAMP, ip_address = ? WHERE token = ?',
         [req.ip, existing.token]);
+      touchUser(userId, false);
       return { token: existing.token, expiresAt: existing.expires_at };
     }
 
@@ -1038,7 +1066,7 @@ app.get('/api/users', adminAuth, (req, res) => {
   }
 
   db.all(
-    `SELECT u.id, u.username, u.created_at,
+    `SELECT u.id, u.username, u.created_at, u.last_login, u.last_seen,
             COUNT(s.id) as active_sessions
      FROM users u
      LEFT JOIN sessions s ON u.id = s.user_id 

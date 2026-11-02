@@ -1659,13 +1659,37 @@
         if (!r.ok) { list.innerHTML = `<div class="hint">${(r.data && r.data.error) || 'Could not load users.'}</div>`; return; }
         const users = Array.isArray(r.data) ? r.data : [];
         if (!users.length) { list.innerHTML = '<div class="hint">No users yet.</div>'; return; }
+        // SQLite stores UTC as "YYYY-MM-DD HH:MM:SS" with no zone; read it as UTC.
+        const parseUtc = (s) => {
+          if (!s) return null;
+          const d = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(s) ? s : String(s).replace(' ', 'T') + 'Z');
+          return isNaN(d) ? null : d;
+        };
+        const ago = (d) => {
+          const s = Math.max(0, (Date.now() - d.getTime()) / 1000);
+          if (s < 90) return 'just now';
+          if (s < 3600) return `${Math.round(s / 60)} min ago`;
+          if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+          return `${Math.round(s / 86400)} d ago`;
+        };
+        const whenCell = (s, withAgo) => {
+          const td = el('td');
+          const d = parseUtc(s);
+          if (!d) { td.textContent = '—'; return td; }
+          td.textContent = d.toLocaleString();
+          td.title = d.toString();
+          if (withAgo) td.appendChild(el('span', { class: 'hint' }, ` (${ago(d)})`));
+          return td;
+        };
         const table = el('table');
-        table.innerHTML = '<thead><tr><th>User</th><th>Created</th><th></th></tr></thead>';
+        table.innerHTML = '<thead><tr><th>User</th><th>Last login</th><th>Last seen</th><th>Created</th><th></th></tr></thead>';
         const tbody = el('tbody');
         users.forEach((user) => {
           const tr = el('tr');
           tr.appendChild(el('td', {}, String(user.username).replace(/</g, '&lt;')));
-          tr.appendChild(el('td', {}, user.created_at ? new Date(user.created_at).toLocaleString() : '—'));
+          tr.appendChild(whenCell(user.last_login, true));
+          tr.appendChild(whenCell(user.last_seen, true));
+          tr.appendChild(whenCell(user.created_at, false));
           const td = el('td');
           if (user.username !== 'admin') {
             const del = el('button', { class: 'btn btn-sm btn-danger', type: 'button' }, 'Delete');
