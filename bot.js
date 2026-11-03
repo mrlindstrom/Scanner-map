@@ -144,6 +144,7 @@ const streetMatching = require('./src/geocoding/streets');
 let ADDRESS_PREFILTER_ENABLED = String(process.env.ADDRESS_PREFILTER ?? 'true').toLowerCase() !== 'false';
 const summaryIncidents = require('./src/summary/incidents');
 const summaryEnrich = require('./src/summary/enrich');
+const radioAliases = require('./src/radio/aliases');
 const audioPreprocess = require('./src/transcription/audioPreprocess');
 const hallucinationFilter = require('./src/transcription/hallucinationFilter');
 const transcriptCorrections = require('./src/transcription/corrections');
@@ -890,6 +891,8 @@ function initializeDatabase() {
         tablesCreated++;
         if (tablesCreated === totalTables) {
           logger.info('Database tables initialized successfully.');
+          radioAliases.init(db, { info: (m) => logger.info(m), warn: (m) => logger.warn(m) })
+            .catch((e) => logger.error(`Radio alias table setup failed: ${e.message}`));
           resolve();
         }
       };
@@ -3209,6 +3212,12 @@ function handleNewAudio(audioData) {
 
         const transcriptionId = this.lastID; // Get the ID from the database insert
         logger.info(`Created transcription record ID ${transcriptionId} using storage path: ${storagePath}`);
+
+        // Keep the call's radio list and learn unit aliases from it (trunk-recorder is the source of truth)
+        if (srcList) {
+          radioAliases.recordCall(db, { transcriptionId, system: normalizeSystemLabel(systemName), srcList, timestamp: unixTimestampSeconds })
+            .catch((e) => logger.warn(`Could not save radio aliases for call ${transcriptionId}: ${e.message}`));
+        }
 
         // Only store an audio BLOB in SQLite for the legacy "db" storage mode.
         // File/object backends (local/s3/r2/b2/minio) keep audio out of the DB
