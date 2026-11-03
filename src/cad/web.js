@@ -24,7 +24,7 @@ function toClient(row) {
     board: row.board,
     minor: !!row.minor,
     dropped: !!row.dropped,
-    type: d.type || 'Unknown',
+    type: (d.type || 'Unknown').replace(/^./, (c) => c.toUpperCase()),
     address: d.address || null,
     lat: d.lat ?? null,
     lon: d.lon ?? null,
@@ -34,7 +34,7 @@ function toClient(row) {
     units: (d.units || []).map(([key, u]) => ({ key, name: u.name, status: u.status, at: u.at, agency: u.agency || null })),
     channels: d.tgNames || [],
     calls: (d.calls || []).map((c) => ({
-      id: c.id, timestamp: c.timestamp, tg: c.tg, text: c.text, fromDispatcher: !!c.fromDispatcher,
+      id: c.id, timestamp: c.timestamp, tg: c.tg, text: c.heard || c.text, part: c.part ? c.text : null, fromDispatcher: !!c.fromDispatcher,
       radios: (c.radios || []).map((r) => r.alias || `Radio ${r.src}`),
     })),
     events: d.events || [],
