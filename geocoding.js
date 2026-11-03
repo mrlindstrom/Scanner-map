@@ -7,6 +7,7 @@ const { getFileTransports } = require('./src/logger');
 const { consoleFormat } = require('./src/consoleFormat');
 const streets = require('./src/geocoding/streets');
 const places = require('./src/geocoding/places');
+const osmStreets = require('./src/geocoding/osmStreets');
 const llmQueue = require('./src/ai/llmQueue');
 const moment = require('moment-timezone');
 const fs = require('fs');
@@ -764,7 +765,49 @@ async function getTargetViewbox() {
   return targetViewboxPromise;
 }
 
-/** Build the street list from addresses already geocoded (call at startup and daily). */
+// Past-geocode streets, kept so the OpenStreetMap names can be added again when they arrive
+let geocodedStreets = [];
+
+/** The street list: streets from past geocodes, plus every OpenStreetMap street name with a street type. */
+function mergeOsmStreets() {
+  const have = new Set(geocodedStreets.map((g) => g.road.toLowerCase()));
+  const extra = [];
+  for (const road of osmStreets.names()) {
+    if (have.has(road.toLowerCase())) continue;
+    const parsed = streets.parseStreet(road);
+    // "Plaistow" (no Road/Drive...) would match any "...Road" spoken; numbered roads are fine
+    if (!parsed.name || (!parsed.suffix && !streets.isNumberedRoad(road))) continue;
+    extra.push({ road, count: 1, parsed, key: streets.soundKey(parsed.name) });
+  }
+  streetGazetteer = geocodedStreets.concat(extra);
+  return extra.length;
+}
+
+/**
+ * Correct each misheard street in an address as spoken ("14,777 Wonderluck Drive at Shaftesbury Drive"
+ * -> "14,777 Wunderlich Drive at Shaftesbury Drive"), against the street list. Streets that are already
+ * real, or have no confident match, are left as heard. Returns { text, fixed: [[heard, real], ...] }.
+ */
+const STREET_PHRASE_RE = /\b((?:[A-Za-z][A-Za-z'-]*\s+){1,3}(?:Street|St|Road|Rd|Drive|Dr|Lane|Ln|Boulevard|Blvd|Parkway|Pkwy|Court|Ct|Circle|Cir|Trail|Trl|Way|Place|Pl|Avenue|Ave|Loop|Crossing|Terrace|Bend|Cove|Pass|Ridge|Run|Path))\b/g;
+const PHRASE_LEAD = /^(?:(?:at|and|in|on|of|the|near|off|by|to|from|onto|into|eastbound|westbound|northbound|southbound|feeder|block|apartments?|unit|suite|number|cross|streets?)\s+)+/i;
+function fixStreets(address) {
+  const text = String(address || '');
+  if (!text || !streetGazetteer.length) return { text, fixed: [] };
+  const fixed = [];
+  const out = text.replace(STREET_PHRASE_RE, (phrase) => {
+    const lead = (phrase.match(PHRASE_LEAD) || [''])[0];
+    const street = phrase.slice(lead.length);
+    if (street.split(/\s+/).length < 2) return phrase;
+    const c = streets.correctStreet(street, streetGazetteer);
+    // the real street keeps the spoken street type ("Sweetwine Lane" is not "Sutton")
+    if (!c || streets.parseStreet(c.road).suffix !== streets.parseStreet(street).suffix) return phrase;
+    fixed.push([street, c.road]);
+    return lead + c.road;
+  });
+  return { text: out, fixed };
+}
+
+/** Build the street list from addresses already geocoded and OpenStreetMap (call at startup and daily). */
 function loadStreetGazetteer(db) {
   return new Promise((resolve) => {
     db.all('SELECT address FROM transcriptions WHERE address IS NOT NULL AND lat IS NOT NULL', [], (err, rows) => {
@@ -772,9 +815,16 @@ function loadStreetGazetteer(db) {
         logger.warn(`[Geocoding] Could not build the street list: ${err.message}`);
         return resolve(streetGazetteer.length);
       }
-      streetGazetteer = streets.buildGazetteer(rows.map((r) => r.address));
-      logger.info(`[Geocoding] Street list: ${streetGazetteer.length} local streets from ${rows.length} past geocodes`);
+      geocodedStreets = streets.buildGazetteer(rows.map((r) => r.address));
+      const osmCount = mergeOsmStreets();
+      logger.info(`[Geocoding] Street list: ${geocodedStreets.length} local streets from ${rows.length} past geocodes`
+        + (osmCount ? ` + ${osmCount} from OpenStreetMap` : ''));
       resolve(streetGazetteer.length);
+      // OpenStreetMap names in the background (saved list at once; refetched weekly, ~1 minute)
+      getTargetViewbox().then((box) => osmStreets.load(box, logger)).then(() => {
+        const n = mergeOsmStreets();
+        if (n && n !== osmCount) logger.info(`[Geocoding] Street list: ${streetGazetteer.length} streets (${n} from OpenStreetMap)`);
+      }).catch((e) => logger.warn(`[Geocoding] OpenStreetMap streets not added: ${e.message}`));
     });
   });
 }
@@ -1298,6 +1348,7 @@ function reloadSettings(changedKeys = []) {
 module.exports = {
   reloadSettings,
   loadStreetGazetteer,
+  fixStreets,
   loadPlaceList,
   extractAddress,
   geocodeAddress,

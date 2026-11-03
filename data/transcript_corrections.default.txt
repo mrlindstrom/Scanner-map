@@ -115,3 +115,88 @@ Boost {n} => Booster {n}
 Eng {n} => Engine {n}
 England {n} => Engine {n}
 Angie {n} => Engine {n}
+
+# Constable/sheriff unit names (phonetic name + number), mined from a week of law-channel
+# calls (Oct 27 - Nov 3 2026). Count = calls heard that way; "same radio" = the same radio
+# also opened a call with the real name and the same number.
+^Trial {n} => Charles {n}    # 123, "Trial 72. Charles 72"
+^Trails {n} => Charles {n}    # 29, "Trails 42 checking"; ^ keeps street names ("Street Trails") safe
+^Troll {n} => Charles {n}    # 15, "Charles 77 ... Troll 77, you're clear"
+^Child {n} => Charles {n}    # 43, "Charles 51 ... Child 51"
+Charlie {n} => Charles {n}
+Charles's {n} => Charles {n}
+Harry {n} => Henry {n}    # 23, "Harry 117. Henry 117"
+Henry's {n} => Henry {n}    # "Henry's 50 ... Henry 50 clear"
+^January {n} => Henry {n}    # 38, "January 84, checking"; same radio
+Frame {n} => Frank {n}    # 60, "41 frame 20 checking. 41 Frank 20 under control"
+Crank {n} => Frank {n}    # same radio
+Frank's {n} => Frank {n}    # same radio
+^Order {n} => Nora {n}    # 58, "Order 17, change my call to a welfare check"; same radio
+Nova {n} => Nora {n}    # "Nova 47 is under control"
+^Team {n} => King {n}    # 78, "Team 14 to Unit 21"; same radio (twice)
+^Item {n} => Adam {n}    # 72, "Item 22 clear", "Item 35, if you could advise"; same radio
+Victory {n} => Victor {n}    # 72, "Victory 535. Be back in for an interior building check"
+Everett {n} => Edward {n}    # 31, "Everett 87, check it out"
+Rubber {n} => Robert {n}    # 19, "One rubber 20. Well, Robert's 20"
+Robert's {n} => Robert {n}
+Willie {n} => William {n}    # "Willie 15. Willie 15"
+Roger {n} => Robert {n}    # "Roger 14, unit 34"; "roger" isn't used as an acknowledgement here
+
+# Fire/EMS apparatus (Northcom, HFD and others), mined from a week of fire/EMS calls
+# (Oct 27 - Nov 3 2026). Count = calls heard that way; "radio" = the unit's own radio
+# alias (E35-M2, TW36-A...) named the real unit on a call that opened with the misheard word.
+Angel {n} => Engine {n}    # 262, "Medic 20, Angel 106"; radio (twice)
+Ninja {n} => Engine {n}    # 88, "Fire comm, engine 124. Ninja 124."
+Indian {n} => Engine {n}    # 14, "Engine 44 northeastern. Indian 4-4"
+Engin {n} => Engine {n}
+Letter {n} => Ladder {n}    # 150, "Letter 68, Medic 60. 8603 Birdwood Road"
+Ladders {n} => Ladder {n}    # "Motor vehicle incident. Ladders 75."
+^Matter {n} => Ladder {n}    # 42, "Matter 84, Charlie, radio check. Engine 24, Bravo, radio check"
+Meg {n} => Medic {n}    # 89, "Unconscious person. Meg 86, engine 86."
+Meta {n} => Medic {n}    # 91, "Breathing problem. Meta 29. Engine 23."
+MiG {n} => Medic {n}    # 27, "Ambulance 46, MiG 40."
+Mag {n} => Medic {n}    # 30, "Engine 39, Mag 67, you can disregard."
+Matic {n} => Medic {n}    # 30, "Matic 1, Tahiris County. Medic 1, go ahead."
+Medics {n} => Medic {n}    # 44, "Breathing problem. Medics 43."
+Medicaid {n} => Medic {n}    # 23, "Medicaid 74, update your status."
+Mic {n} => Medic {n}    # 30, "Seizures. Mic 96. 10510 ..."
+Squab {n} => Squad {n}
+Moose {n} => Booster {n}    # radio (B33 "Moose 33 on scene")
+Anchor {n} => Tanker {n}    # "Anchor 64 is in service for training. Tanker 64 in service." (confirmed by user)
+
+# Northcom COM 1 / COM 2 / COM 3 (all 3,709 COM 2 dispatches to date, two weeks of COM 1 and 3)
+Locker {n} => Blocker {n}    # 9, "Locker 101. Assist law enforcement with blocking."
+Buster {n} => Booster {n}    # 5
+injured person from AFL => injured person from a fall    # 110 on COM 2 (the most common mishearing there)
+from AFOL => from a fall    # 21
+a known odor => an unknown odor    # 6
+unknown order => unknown odor
+with intrapidant => with entrapment    # "motor vehicle incident with intrapidant"
+with intraprended => with entrapment
+with intrepidant => with entrapment
+with intravenant => with entrapment
+Loader vehicle incident => Motor vehicle incident    # 9
+possible CBA => possible CVA    # 4
+gas league => gas leak
+pulse alarm => false alarm
+Curt Endall => Kuykendahl    # COM 2 "23,303 Curt Endall Road at Willow Pass" (confirmed by user)
+Curtendall => Kuykendahl
+Kurt Endall => Kuykendahl
+Curt Kendall => Kuykendahl
+Kurt Kendall => Kuykendahl
+Perkendall => Kuykendahl    # 19
+Cookendall => Kuykendahl    # 18
+Crickendall => Kuykendahl    # 15
+
+# Cemetery roads (real names from OpenStreetMap)
+Climb Cemetery => Klein Cemetery    # "Spring Cypress Road and Climb Cemetery Road" (user)
+Kline Cemetery => Klein Cemetery
+Kid Cemetery => Kidd Cemetery    # 15+3, "Kid Cemetery Road and US Highway 59"
+Kids Cemetery => Kidd Cemetery
+Cued Cemetery => Cude Cemetery    # 13
+Cube Cemetery => Cude Cemetery    # 9, "Lexington Heights Drive and Cube Cemetery Road"
+Jude Cemetery => Cude Cemetery    # 6
+Coot Cemetery => Cude Cemetery    # 5
+Robert Cemetery => Roberts Cemetery    # 8
+Tomwell Cemetery => Tomball Cemetery
+Tumble Cemetery => Tomball Cemetery

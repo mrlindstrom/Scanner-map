@@ -15,6 +15,7 @@ data/apikeys.plain.json
 data/ai-paused.json
 data/ai-catchup.json
 data/places-cache.json
+data/osm-streets-cache.json
 
 # Backups (may contain secrets or live data)
 *.bak

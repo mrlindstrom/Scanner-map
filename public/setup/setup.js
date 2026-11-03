@@ -1174,12 +1174,23 @@
         return rows;
       };
 
+      const fmtCreated = (ts) => (ts ? new Date(ts).toLocaleString([], { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—');
+
       const renderCats = () => {
         catWrap.innerHTML = '';
         if (!allCategories.length) { catWrap.textContent = 'No categories.'; return; }
         const table = el('table');
-        table.innerHTML = '<thead><tr><th></th><th>Category</th><th>Channels</th></tr></thead>';
+        table.innerHTML = '<thead><tr><th></th><th>Category</th><th>Channels</th><th>Created</th></tr></thead>';
         const tb = el('tbody');
+        // Categories sharing a name: the oldest is the original, later ones are marked as duplicates
+        const oldestByName = new Map();
+        allCategories.forEach((cat) => {
+          const k = cat.name.trim().toLowerCase();
+          const o = oldestByName.get(k);
+          if (!o || (cat.createdTimestamp || 0) < (o.createdTimestamp || 0)) oldestByName.set(k, cat);
+        });
+        const nameCounts = new Map();
+        allCategories.forEach((cat) => { const k = cat.name.trim().toLowerCase(); nameCounts.set(k, (nameCounts.get(k) || 0) + 1); });
         allCategories.forEach((cat) => {
           const tr = el('tr');
           const cbtd = el('td');
@@ -1188,7 +1199,15 @@
           cb.addEventListener('change', () => { if (cb.checked) selCategories.add(cat.id); else selCategories.delete(cat.id); updateCount(); });
           cbtd.appendChild(cb); tr.appendChild(cbtd);
           const nameTd = el('td'); nameTd.textContent = cat.name; tr.appendChild(nameTd);
+          const key = cat.name.trim().toLowerCase();
+          if (nameCounts.get(key) > 1) {
+            const original = oldestByName.get(key) === cat;
+            const tag = el('span', { style: `margin-left:8px;font-size:12px;color:${original ? 'var(--muted)' : '#e0a030'}` });
+            tag.textContent = original ? '(original)' : '(duplicate: newer copy)';
+            nameTd.appendChild(tag);
+          }
           tr.appendChild(el('td', {}, String(cat.channelCount)));
+          tr.appendChild(el('td', {}, fmtCreated(cat.createdTimestamp)));
           tb.appendChild(tr);
         });
         table.appendChild(tb); catWrap.appendChild(table);
@@ -1199,7 +1218,7 @@
         wrap.innerHTML = '';
         if (!rows.length) { wrap.textContent = 'No channels match your filters.'; return; }
         const table = el('table');
-        table.innerHTML = '<thead><tr><th></th><th>Category</th><th>Channel</th></tr></thead>';
+        table.innerHTML = '<thead><tr><th></th><th>Category</th><th>Channel</th><th>Created</th></tr></thead>';
         const tb = el('tbody');
         rows.forEach((ch) => {
           const tr = el('tr');
@@ -1210,6 +1229,7 @@
           cbtd.appendChild(cb); tr.appendChild(cbtd);
           const catTd = el('td'); catTd.textContent = ch.category || '—'; tr.appendChild(catTd);
           const nameTd = el('td'); nameTd.textContent = '#' + ch.name; tr.appendChild(nameTd);
+          tr.appendChild(el('td', {}, fmtCreated(ch.createdTimestamp)));
           tb.appendChild(tr);
         });
         table.appendChild(tb); wrap.appendChild(table);

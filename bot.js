@@ -3161,6 +3161,14 @@ function handleNewAudio(audioData) {
     return;
   }
 
+  // Encrypted calls (trunk-recorder's "encrypted" flag) are only noise to the transcriber,
+  // which turns them into "Thank you." and the like: drop them before anything is saved or sent
+  if (isFlagSet(encrypted)) {
+    logger.info(`Skipping encrypted call on TG ${talkGroupID} (${filename})`);
+    fs.unlink(tempPath, (err) => { if (err && err.code !== 'ENOENT') logger.error(`Error deleting encrypted call ${tempPath}:`, err); });
+    return;
+  }
+
   // Verify the file exists before proceeding (Moved here from processNextTranscription)
   if (!fs.existsSync(tempPath)) {
     logger.error(`Audio file doesn't exist when starting handleNewAudio: ${tempPath}`);
@@ -3678,6 +3686,8 @@ const cadTracker = createCadTracker({
   timeLabel: (ts) => summaryTimeLabel(ts),
   // Normal priority: the board should keep up, but address extraction still comes first
   ai: (prompt, numPredict) => summaryAiCompletion(prompt, numPredict, { label: 'CAD', priority: 'normal', timeoutMs: 90 * 1000 }),
+  // Show real street names on the board ("Wonderluck Drive" -> "Wunderlich Drive")
+  fixStreets: (address) => geocodingModule.fixStreets(address),
 });
 
 // Function to update transcription
@@ -5671,6 +5681,20 @@ function getChannelName(talkGroupName) {
 const categoryCache = new Map();
 const categoryLocks = new Map(); // name -> Promise<category> (prevents duplicate categories under concurrency)
 
+/**
+ * The bot's guild once Discord has finished loading it. Calls are accepted before
+ * client.login() even resolves, and until the client is ready the guild's channel
+ * list is incomplete; looking up categories then created duplicates after every restart.
+ */
+async function readyGuild(timeoutMs = 120000) {
+  const start = Date.now();
+  while (!(client.isReady && client.isReady() && client.guilds.cache.first() && client.guilds.cache.first().available)) {
+    if (Date.now() - start > timeoutMs) return null;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return client.guilds.cache.first();
+}
+
 function getOrCreateCategory(categoryName, callback) {
   if (categoryCache.has(categoryName)) {
     return callback(categoryCache.get(categoryName));
@@ -5681,18 +5705,19 @@ function getOrCreateCategory(categoryName, callback) {
     return;
   }
 
-  const guild = client.guilds.cache.first();
-  if (!guild) {
-    logger.error('No guild found for the bot.');
-    return callback(null);
-  }
-
   const p = (async () => {
+    const guild = await readyGuild();
+    if (!guild) throw new Error('No guild found for the bot.');
     if (categoryCache.has(categoryName)) return categoryCache.get(categoryName);
-    let category = guild.channels.cache.find(
+    const find = () => guild.channels.cache.find(
       (channel) => channel.name === categoryName && channel.type === ChannelType.GuildCategory
     );
+    let category = find();
+    // Not in the cache: ask Discord before creating, so a cache that isn't complete yet
+    // (right after a restart) never makes a second category with the same name
+    if (!category) { await guild.channels.fetch(); category = find(); }
     if (!category) {
+      logger.info(`[discord] creating category "${categoryName}"`);
       category = await guild.channels.create({ name: categoryName, type: ChannelType.GuildCategory });
       channelOrderer.categoriesChanged(); // keep pinned categories above the new one
     }
@@ -5723,18 +5748,17 @@ function getOrCreateChannel(channelName, categoryId, callback) {
     return;
   }
 
-  const guild = client.guilds.cache.first();
-  if (!guild) {
-    logger.error('No guild found for the bot.');
-    return callback(null);
-  }
-
   const p = (async () => {
+    const guild = await readyGuild();
+    if (!guild) throw new Error('No guild found for the bot.');
     if (channelCache.has(cacheKey)) return channelCache.get(cacheKey);
-    let channel = guild.channels.cache.find(
+    const find = () => guild.channels.cache.find(
       (ch) => ch.name === channelName && ch.parentId === categoryId && ch.type === ChannelType.GuildText
     );
+    let channel = find();
+    if (!channel) { await guild.channels.fetch(); channel = find(); } // see getOrCreateCategory
     if (!channel) {
+      logger.info(`[discord] creating channel "${channelName}" in category ${categoryId}`);
       channel = await guild.channels.create({
         name: channelName,
         type: ChannelType.GuildText,
@@ -6267,6 +6291,13 @@ client.once('clientReady', async () => {
   isBootComplete = true;
 });
 
+// A deleted category or channel (by hand, or from Settings -> Discord) must leave the
+// caches, or the next call posts into it / creates a channel under a parent that's gone.
+client.on('channelDelete', (ch) => {
+  for (const [name, cat] of categoryCache) if (cat && cat.id === ch.id) categoryCache.delete(name);
+  for (const [key, c] of channelCache) if (c && (c.id === ch.id || key.startsWith(`${ch.id}-`))) channelCache.delete(key);
+});
+
 client.on('interactionCreate', async (interaction) => {
   // Handle Slash Commands
   if (interaction.isCommand()) {
@@ -6763,7 +6794,7 @@ app.get('/internal/discord/channels', (req, res) => {
   for (const ch of channels) if (ch.parentId) childCounts[ch.parentId] = (childCounts[ch.parentId] || 0) + 1;
   const categories = Array.from(guild.channels.cache
     .filter((ch) => ch.type === ChannelType.GuildCategory)
-    .map((ch) => ({ id: ch.id, name: ch.name, channelCount: childCounts[ch.id] || 0, position: ch.rawPosition != null ? ch.rawPosition : (ch.position || 0) }))
+    .map((ch) => ({ id: ch.id, name: ch.name, channelCount: childCounts[ch.id] || 0, position: ch.rawPosition != null ? ch.rawPosition : (ch.position || 0), createdTimestamp: ch.createdTimestamp || 0 }))
     .values())
     .sort((a, b) => a.name.localeCompare(b.name));
 
