@@ -29,6 +29,10 @@ const IDLE_MIN = { P1: 60, P2: 45, P3: 30, P4: 20 };
 const REVIEW_EVERY_MS = 5 * 60 * 1000;
 const MAX_CALL_AGE_SEC = 10 * 60; // after an AI pause, skip calls too old to matter
 const MAX_CALLS_KEPT = 60;
+const ACK_WINDOW_SEC = 45; // the unit that answers a dispatch within this long is the one assigned
+const RADIO_WINDOW_SEC = 60 * 60; // a radio's last call on an incident ties its next status to it for an hour
+// Incident status the AI read from a radio's own call -> that radio's unit status
+const RADIO_STATUS = { dispatched: 'dispatched', 'en route': 'en route', 'on scene': 'on scene', 'under control': 'on scene', closed: 'clear' };
 
 // Dispatcher consoles and channels, never field units
 const CONSOLE_RE = /\b(op\s?\d*|north comm|disp(atch)?|console|com\s?\d+)\b|^hc sheriff|^hcc\d/i;
@@ -41,7 +45,20 @@ const PHONETIC = /^(adam|boy|charles|david|edward|frank|george|henry|ida|john|ki
 const TEXT_UNIT_RE = /\b(engine|eng|medic|ambulance|booster|ladder|truck|tower|squad|rescue|battalion|district|tanker|brush|adam|boy|charles|david|edward|frank|george|henry|ida|john|king|lincoln|mary|nora|ocean|paul|queen|robert|sam|tom|union|victor|william|x-ray|young|zebra)[\s-]?(\d{1,3})(?!\d)/gi;
 const STREET_STOP = new Set(['street', 'road', 'drive', 'avenue', 'lane', 'boulevard', 'parkway', 'freeway', 'highway',
   'north', 'south', 'east', 'west', 'houston', 'texas', 'county', 'harris', 'court', 'place', 'circle', 'trail', 'spring']);
-const STATUS_RE = /\b(on ?scene|en ?route|responding|arrived|arriving|clear(ed)?|in service|available|10-?8|10-?97|10-?23|10-?24|10-?7|transport(ing)?|to the hospital|disregard|cancel(led)?|under control|fire (is )?out|code 4|in custody|staging|staged|command|upgrade|downgrade)\b/i;
+const STATUS_RE = /\b(show me (out|clear|on ?scene|en ?route|10-?\d+|arriv\w*)|showing out|on ?scene|en ?route|responding|arrived|arriving|clear(ed)?|in service|available|10-?8|10-?97|10-?23|10-?24|10-?7|transport(ing)?|to the hospital|disregard|cancel(led)?|under control|fire (is )?out|code 4|in custody|staging|staged|command|upgrade|downgrade)\b/i;
+// Short status phrase -> unit status (checked in this order)
+const QUICK_STATUS = [
+  [/\b(clear(ed)?( from| of)?( the)? (call|scene)|show me clear|i'?m clear|back in service|in service|10-?8|available|clear on (it|that)|cancel(led)?|disregard)\b/i, 'clear'],
+  [/\b(transport(ing)?|en ?route to (the )?hospital|to the hospital)\b/i, 'transporting'],
+  [/\b(under control|code 4|scene (is )?secure)\b/i, 'under control'],
+  [/\b(on ?scene|arrived|arriving|10-?97|10-?23|show me (on ?scene|arriv\w*)|show me out (at|with|on|in)|showing out|i'?m (out )?here)\b/i, 'on scene'],
+  [/\b(en ?route|responding|10-?76|on (my|the) way|headed that way)\b/i, 'en route'],
+];
+const STATUS_ORDER = ['pending', 'dispatched', 'en route', 'on scene', 'under control', 'closed'];
+function quickStatus(text) {
+  for (const [re, st] of QUICK_STATUS) if (re.test(text)) return st;
+  return null;
+}
 const CLOSE_RE = /\b(clear(ed)?( from| of)?( the)? (call|scene)|show me clear|in service|back in service|available|10-?8|disregard|cancel(led)?|no longer needed|10-?24|10-?42|terminat(e|ing) command)\b/i;
 const FIRE_RE = /\b(fire|fd|vfd|esd|ems|medic|rescue|north ?comm?|northcom)\b/i;
 
@@ -105,6 +122,8 @@ function talkGroupFilter(env) {
 
 function createCadTracker({ db, logger, ai, timeLabel, env = process.env, clock = () => Date.now() }) {
   const incidents = new Map(); // open (not closed, not dropped) incidents by id
+  const lastDispatch = new Map(); // channel -> { incId, at } of the dispatcher's latest assignment on it
+  const consoleRadios = new Map(); // radio id -> when it was found to act like a dispatcher console
   let queue = Promise.resolve();
   let lastReview = Date.now();
   let timer = null;
@@ -113,6 +132,7 @@ function createCadTracker({ db, logger, ai, timeLabel, env = process.env, clock 
   const run = (sql, p = []) => new Promise((res, rej) => db.run(sql, p, function (e) { if (e) rej(e); else res(this); }));
   const get = (sql, p = []) => new Promise((res, rej) => db.get(sql, p, (e, r) => (e ? rej(e) : res(r))));
   const all = (sql, p = []) => new Promise((res, rej) => db.all(sql, p, (e, r) => (e ? rej(e) : res(r || []))));
+  const debug = (m) => (logger.debug ? logger.debug(`CAD: ${m}`) : null);
   const enabled = () => String(env.CAD_ENABLED ?? 'true').toLowerCase() !== 'false';
 
   function init() {
@@ -140,7 +160,7 @@ function createCadTracker({ db, logger, ai, timeLabel, env = process.env, clock 
       id: row.id, opened: row.opened, updated: row.updated, closed: row.closed, priority: row.priority, status: row.status,
       type: d.type || 'Unknown', address: d.address || null, lat: d.lat ?? null, lon: d.lon ?? null,
       units: new Map(d.units || []), agencies: new Map(d.agencies || []), tgs: new Set(d.tgs || []), tgNames: new Set(d.tgNames || []),
-      tokens: new Set(d.tokens || []), calls: d.calls || [], events: d.events || [], reviewedCalls: d.reviewedCalls || 0,
+      tokens: new Set(d.tokens || []), radios: new Map(d.radios || []), calls: d.calls || [], events: d.events || [], reviewedCalls: d.reviewedCalls || 0,
       removed: d.removed || 0, closedBy: d.closedBy || null, mergedFrom: d.mergedFrom || [],
     };
   }
@@ -156,7 +176,7 @@ function createCadTracker({ db, logger, ai, timeLabel, env = process.env, clock 
   async function save(inc, { dropped = false, mergedInto = null } = {}) {
     const data = {
       type: inc.type, address: inc.address, lat: inc.lat, lon: inc.lon,
-      units: [...inc.units], agencies: [...inc.agencies], tgs: [...inc.tgs], tgNames: [...inc.tgNames], tokens: [...inc.tokens],
+      units: [...inc.units], agencies: [...inc.agencies], tgs: [...inc.tgs], tgNames: [...inc.tgNames], tokens: [...inc.tokens], radios: [...inc.radios],
       calls: inc.calls.slice(-MAX_CALLS_KEPT), events: inc.events.slice(-150), reviewedCalls: inc.reviewedCalls, removed: inc.removed,
       closedBy: inc.closedBy, mergedFrom: inc.mergedFrom, mergedInto,
     };
@@ -202,7 +222,7 @@ New radio call:
 ${callHeader(call)} "${call.text.slice(0, 500)}"
 
 Decide:
-- "update": the call is about one of the open incidents above (same address, same units, or a clear follow-up such as a unit going en route, on scene, clear, or a size-up). A unit already on an open incident reporting an updated or corrected address is still that incident.
+- "update": the call is about one of the open incidents above (same address, same units, or a clear follow-up such as a unit going en route, on scene, clear, or a size-up). A unit already on an open incident reporting an updated or corrected address is still that incident. Dispatchers often re-broadcast a call (asking for an available unit, adding details, or assigning it): the same kind of call on the same channel within about 15 minutes is that incident, even when the wording differs ("gunshots heard" / "discharge firearm") or the address is missing or garbled, unless the call gives a clearly different address.
 - "new": the call dispatches or reports a new incident: it needs a call type AND either a location or a field unit being sent.
 - "ignore": chatter with no incident, radio checks, acknowledgements, administrative talk, anything too vague, or a status update you cannot tie to one incident above.
 
@@ -235,19 +255,21 @@ Check:
 - Is this a real incident? Answer keep=false only if its calls show no actual incident (garbled words, chatter, an administrative remark).
 - Do any of its calls clearly belong to a different incident? List their times in "wrong_calls".
 - Priority from what the calls actually say: ${PRIORITY_SCALE} Lower it when the traffic shows all clear, nothing showing, no injuries, EMS refused, or a false alarm.
-- Is it the same incident as one of the others (same address, or an updated address for the same units)? Give that id in merge_with.
+- Is it the same incident as one of the others? Same address, an updated address for the same units, or the same kind of call on the same channel within about 15 minutes where one address is missing or garbled (a dispatcher re-broadcasting a call for an available unit). Give that id in merge_with.
 
 Return ONLY JSON:
 {"keep": true, "priority": "P1 | P2 | P3 | P4", "priority_reason": "short", "call_type": "short type", "status": "dispatched | en route | on scene | under control | closed", "wrong_calls": ["2:23 PM"], "merge_with": null}`;
   }
 
   function applyUnits(inc, units, at, aliasUnits, prefixes) {
+    const named = [];
     for (const u of Array.isArray(units) ? units : []) {
       const name = String(u.unit || '').trim(); const st = String(u.status || '').toLowerCase();
       if (!name || !UNIT_STATUSES.includes(st) || CONSOLE_RE.test(name)) continue;
       const m = name.match(/^([a-z-]+)\s?-?\s?(\d{1,3})\b/i);
       const k = m ? unitKey(m[1], m[2]) : null;
       if (!k) continue; // bare numbers and other unidentifiable "units"
+      named.push(k);
       const prev = inc.units.get(k);
       const alias = aliasUnits.get(k);
       const display = alias || (prev && prev.name) || name;
@@ -261,6 +283,7 @@ Return ONLY JSON:
         event(inc, at, `${tag} on the air`);
       }
     }
+    return named;
   }
 
   async function processCall(id) {
@@ -278,7 +301,13 @@ Return ONLY JSON:
 
     const prefixes = parseAgencyPrefixes(env.CAD_AGENCY_PREFIXES);
     const text = String(row.transcription).replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\s+/g, ' ').trim();
-    const radios = (await radioAliases.radiosForCall(db, row.system || '', row.src_list)).map((r) => ({ src: r.src, alias: r.alias }));
+    // One entry per radio: trunk-recorder repeats a radio on each transmission but sends its alias only once
+    const radios = [];
+    for (const r of await radioAliases.radiosForCall(db, row.system || '', row.src_list)) {
+      const seen = radios.find((x) => x.src === r.src);
+      if (!seen) radios.push({ src: r.src, alias: r.alias });
+      else if (!seen.alias && r.alias) seen.alias = r.alias;
+    }
     const firstAlias = radios.length ? radios[0].alias : null;
     const call = {
       id: row.id, timestamp: row.timestamp, tg: row.tg_name, agency: row.tg_cat || row.system || 'Unknown',
@@ -292,16 +321,59 @@ Return ONLY JSON:
     const { score } = triage.scoreCall({ transcription: text, category: row.category, address: row.address, lat: row.lat, lon: row.lon, tones: [], keywords: [] });
     const words = text.split(/\s+/).length;
     const statusy = STATUS_RE.test(text);
-    if (!(isDispatchVoice || score >= 2.5 || (statusy && words >= 3))) return;
 
+    // Field radios on this call (by radio number, alias or not) and the open incidents they have talked on.
+    // Police radios rarely send aliases, so the number is what ties "show me on scene" to its call.
     const open = [...incidents.values()];
+    for (const r of radios) if (!consoleRadios.has(r.src) && isConsoleLike(r.src, call.timestamp)) await forgetConsole(r.src);
+    const fieldRadios = radios.filter((r) => !(r.alias && CONSOLE_RE.test(r.alias)) && !isConsoleLike(r.src, call.timestamp)).map((r) => r.src);
+    const byRadio = open.filter((inc) => fieldRadios.some((id) => {
+      const seen = inc.radios.get(id);
+      return seen && call.timestamp - seen.at < RADIO_WINDOW_SEC;
+    }));
+    call.fieldRadios = fieldRadios;
+
+    // The first field radio to answer a dispatcher's assignment on the same channel is the assigned unit.
+    // Acknowledgements ("copy", "10-4 en route") are too short for the AI gate, so take them here.
+    const pending = lastDispatch.get(call.tgKey);
+    if (pending && fieldRadios.length && !call.fromDispatcher && call.timestamp - pending.at <= ACK_WINDOW_SEC) {
+      const target = incidents.get(pending.incId);
+      if (target && fieldRadios.every((id) => !target.radios.has(id))) {
+        lastDispatch.delete(call.tgKey);
+        const named = unitKeys.filter((k) => target.units.has(k));
+        for (const id of fieldRadios) target.radios.set(id, { at: call.timestamp, unit: named.length === 1 ? named[0] : null });
+        event(target, call.timestamp, `radio ${fieldRadios.join(', ')} answered the dispatch`);
+        const ackStatus = quickStatus(text) || 'dispatched';
+        if (score < 2.5 && words <= 12) { // a plain acknowledgement: record it and stop
+          await applyQuickStatus(target, call, ackStatus === 'clear' ? 'dispatched' : ackStatus, unitKeys);
+          debug(`call ${row.id}: acknowledged #${target.id} (radio ${fieldRadios.join(',')})`);
+          return;
+        }
+      }
+    }
+    if (!(isDispatchVoice || score >= 2.5 || (statusy && (words >= 3 || byRadio.length)))) { debug(`call ${row.id}: skipped (score ${score}, no status words)`); return; }
+
     const byUnit = open.filter((inc) => unitKeys.some((k) => inc.units.has(k) && inc.units.get(k).status !== 'clear'));
+    const known = [...new Set([...byUnit, ...byRadio])];
+
+    // A short status ("show me on scene", "I'm under control", "10-8") from a radio or unit that is on
+    // exactly one open incident: apply it directly. No AI guess needed, and it never gets "ignored".
+    const quick = quickStatus(text);
+    if (quick && known.length === 1 && !isDispatchVoice && words <= 16 && score < 4) {
+      await applyQuickStatus(known[0], call, quick, unitKeys);
+      debug(`call ${row.id}: status "${quick}" → #${known[0].id} (by ${byRadio.includes(known[0]) ? 'radio' : 'unit'})`);
+      return;
+    }
     let cands; let hint = '';
-    if (byUnit.length && !isDispatchVoice) {
-      cands = byUnit.slice(0, 3);
-      hint = `Units on this call (${unitKeys.join(', ')}) are already assigned to ${cands.map((c) => `#${c.id}`).join(', ')}. Treat it as an update to that incident unless it clearly dispatches a different, new incident.`;
+    if (known.length && !isDispatchVoice) {
+      cands = known.slice(0, 3);
+      const why = [
+        byUnit.length ? `units ${unitKeys.join(', ')} are assigned to ${byUnit.slice(0, 3).map((c) => `#${c.id}`).join(', ')}` : '',
+        byRadio.length ? `the same radio${fieldRadios.length > 1 ? 's' : ''} (${fieldRadios.map((id) => `radio ${id}`).join(', ')}) already talked on ${byRadio.slice(0, 3).map((c) => `#${c.id}`).join(', ')}` : '',
+      ].filter(Boolean).join(', and ');
+      hint = `On this call, ${why}. Treat it as an update to that incident (a status such as en route, on scene, or clear) unless it clearly dispatches a different, new incident.`;
     } else {
-      if (statusy && !unitKeys.length && !row.address && score < 2.5) return; // a "clear" nobody can be tied to
+      if (statusy && !unitKeys.length && !row.address && score < 2.5) { debug(`call ${row.id}: skipped (status with no known unit or radio)`); return; } // a "clear" nobody can be tied to
       const toks = streetTokens(row.address || text);
       // A dispatch that sends a unit already working an incident is often more help or a corrected address for it
       if (isDispatchVoice && byUnit.length) {
@@ -320,13 +392,14 @@ Return ONLY JSON:
 
     const d = extractJson(await ai(decidePrompt(call, cands, hint), 600));
     const action = String(d.action || '').toLowerCase();
+    debug(`call ${row.id}: ${action}${d.incident_id ? ` #${d.incident_id}` : ''} (candidates ${cands.map((c) => `#${c.id}`).join(',') || 'none'}; by unit ${byUnit.map((c) => `#${c.id}`).join(',') || '-'}; by radio ${byRadio.map((c) => `#${c.id}`).join(',') || '-'}; field radios ${fieldRadios.join(',') || '-'})`);
     let inc;
     if (action === 'update') {
       inc = incidents.get(Number(d.incident_id));
       if (!inc) return;
     } else if (action === 'new') {
       inc = { id: null, opened: row.timestamp, updated: row.timestamp, closed: null, priority: 'P3', status: 'pending', type: 'Unknown',
-        address: null, lat: null, lon: null, units: new Map(), agencies: new Map(), tgs: new Set(), tgNames: new Set(), tokens: new Set(),
+        address: null, lat: null, lon: null, units: new Map(), agencies: new Map(), tgs: new Set(), tgNames: new Set(), tokens: new Set(), radios: new Map(),
         calls: [], events: [], reviewedCalls: 0, removed: 0, closedBy: null, mergedFrom: [] };
     } else return;
 
@@ -355,9 +428,106 @@ Return ONLY JSON:
         if (CLOSE_RE.test(text)) { inc.closed = row.timestamp; inc.closedBy = 'radio'; inc.status = 'closed'; event(inc, row.timestamp, 'closed on the radio'); }
       } else { event(inc, row.timestamp, `status → ${st}`); inc.status = st; }
     }
-    applyUnits(inc, d.units, row.timestamp, aliasUnits, prefixes);
+    const namedKeys = applyUnits(inc, d.units, row.timestamp, aliasUnits, prefixes);
+    if (call.fromDispatcher && !isDispatchVoice && !inc.closed) lastDispatch.set(call.tgKey, { incId: inc.id || null, at: row.timestamp, inc });
+    applyRadios(inc, call, namedKeys, st, row.timestamp);
     if (d.note) event(inc, row.timestamp, `note: ${String(d.note).slice(0, 160)}`);
     await save(inc);
+    const ld = lastDispatch.get(call.tgKey);
+    if (ld && ld.inc === inc) ld.incId = inc.id;
+  }
+
+  async function forgetConsole(radioId) {
+    for (const inc of [...incidents.values()]) {
+      if (!inc.radios.has(radioId)) continue;
+      inc.radios.delete(radioId);
+      if (inc.units.has(`R${radioId}`)) inc.units.delete(`R${radioId}`);
+      await save(inc);
+    }
+    consoleRadios.set(radioId, Math.floor(clock() / 1000));
+  }
+
+  /** A status-only call from a radio or unit already on this incident */
+  async function applyQuickStatus(inc, call, status, unitKeys) {
+    const at = call.timestamp;
+    inc.updated = Math.max(inc.updated, at);
+    inc.calls.push(call);
+    inc.tgs.add(call.tgKey); inc.tgNames.add(call.tg);
+    const unitStatus = status === 'under control' ? 'on scene' : status;
+    // Which unit spoke: a named unit on this incident, else the radio's linked unit, else the radio itself
+    const named = unitKeys.filter((k) => inc.units.has(k));
+    const targets = named.length ? named : (call.fieldRadios || []).map((id) => (inc.radios.get(id) || {}).unit || `R${id}`);
+    for (const id of call.fieldRadios || []) {
+      const prev = inc.radios.get(id);
+      inc.radios.set(id, { at, unit: (prev && prev.unit) || (named.length === 1 ? named[0] : null) });
+    }
+    for (const key of targets) {
+      const u = inc.units.get(key);
+      const radioId = key.startsWith('R') && /^R\d+$/.test(key) ? key.slice(1) : null;
+      const alias = radioId ? (call.radios.find((r) => r.src === radioId) || {}).alias : null;
+      const name = u ? u.name : (alias || (radioId ? `Radio ${radioId}` : key));
+      if (!u || u.status !== unitStatus) {
+        inc.units.set(key, { ...(u || {}), name, status: unitStatus, at, ...(radioId ? { radio: radioId } : {}) });
+        event(inc, at, `${name} ${unitStatus}`);
+      }
+    }
+    // The incident moves forward with its units; it closes when every unit has cleared on the radio
+    const active = [...inc.units.values()].filter((u) => u.status !== 'clear');
+    if (status === 'clear' && active.length === 0) {
+      inc.closed = at; inc.closedBy = 'radio'; inc.status = 'closed'; event(inc, at, 'closed on the radio (all units clear)');
+    } else {
+      const next = status === 'clear' ? null : status === 'transporting' ? 'on scene' : status === 'dispatched' ? 'dispatched' : status;
+      if (next && STATUS_ORDER.indexOf(next) > STATUS_ORDER.indexOf(inc.status)) { event(inc, at, `status → ${next}`); inc.status = next; }
+    }
+    await save(inc);
+  }
+
+  // A radio that talked on many different open incidents in the last hour is a dispatcher console, not a unit
+  function isConsoleLike(radioId, at) {
+    const flagged = consoleRadios.get(radioId);
+    if (flagged && at - flagged < 2 * 3600) return true; // re-checked every 2 hours, so a busy unit isn't ignored for good
+    let n = 0;
+    for (const inc of incidents.values()) {
+      const seen = inc.radios.get(radioId);
+      if (seen && at - seen.at < RADIO_WINDOW_SEC) n++;
+    }
+    return n >= 4;
+  }
+
+  /**
+   * Record the call's field radios on the incident and track their status.
+   * A radio is linked to a named unit when the call has one field radio and
+   * names one unit ("Charles 34, en route"); then that unit carries the status.
+   * Otherwise the radio shows as its own unit ("Radio 1215361").
+   */
+  function applyRadios(inc, call, namedKeys, incStatus, at) {
+    const ids = call.fieldRadios || [];
+    if (!ids.length) return;
+    const status = RADIO_STATUS[incStatus] || null;
+    if (ids.length === 1 && namedKeys.length === 1) {
+      const key = namedKeys[0];
+      const prev = inc.radios.get(ids[0]);
+      inc.radios.set(ids[0], { at, unit: key });
+      const radioUnit = `R${ids[0]}`;
+      if (inc.units.has(radioUnit) && radioUnit !== key) inc.units.delete(radioUnit); // now known by name
+      if (!prev || prev.unit !== key) event(inc, at, `radio ${ids[0]} is ${inc.units.get(key)?.name || key}`);
+      return;
+    }
+    for (const id of ids) {
+      const prev = inc.radios.get(id);
+      const unitKey = (prev && prev.unit) || `R${id}`;
+      inc.radios.set(id, { at, unit: prev ? prev.unit || null : null });
+      if (!status) continue;
+      const alias = (call.radios.find((r) => r.src === id) || {}).alias;
+      const u = inc.units.get(unitKey);
+      // A named unit already updated by this call keeps what the AI said
+      if (u && u.at === at) continue;
+      if (!u || u.status !== status) {
+        const name = u ? u.name : (alias || `Radio ${id}`);
+        inc.units.set(unitKey, { name, status, at, agency: u ? u.agency : null, radio: id });
+        event(inc, at, `${name} ${status}`);
+      }
+    }
   }
 
   async function review() {
@@ -389,10 +559,19 @@ Return ONLY JSON:
       if (INC_STATUSES.includes(d.status) && d.status !== 'closed' && d.status !== inc.status) { event(inc, now, `status → ${d.status}`); inc.status = d.status; }
       const twin = incidents.get(Number(d.merge_with));
       if (twin && twin !== inc) {
-        const [keepInc, gone] = twin.opened <= inc.opened ? [twin, inc] : [inc, twin];
+        // The more serious incident survives, so its type and address name the result ("Gunshots heard", not
+        // "Loud noise"); between equals, the older one. It keeps the earlier opened time either way.
+        const rank = (x) => PRI.indexOf(x.priority);
+        const [keepInc, gone] = rank(twin) !== rank(inc)
+          ? (rank(twin) < rank(inc) ? [twin, inc] : [inc, twin])
+          : (twin.opened <= inc.opened ? [twin, inc] : [inc, twin]);
+        keepInc.opened = Math.min(keepInc.opened, gone.opened);
+        if (!keepInc.address && gone.address) keepInc.address = gone.address;
+        if (keepInc.lat == null && gone.lat != null) { keepInc.lat = gone.lat; keepInc.lon = gone.lon; }
         keepInc.calls = [...keepInc.calls, ...gone.calls].sort((a, b) => a.timestamp - b.timestamp);
         for (const [k, v] of gone.units) if (!keepInc.units.has(k)) keepInc.units.set(k, v);
         for (const [k, v] of gone.agencies) keepInc.agencies.set(k, v);
+        for (const [k, v] of gone.radios) if (!keepInc.radios.has(k) || keepInc.radios.get(k).at < v.at) keepInc.radios.set(k, v);
         gone.tokens.forEach((t) => keepInc.tokens.add(t)); gone.tgs.forEach((t) => keepInc.tgs.add(t)); gone.tgNames.forEach((t) => keepInc.tgNames.add(t));
         if (PRI.indexOf(gone.priority) < PRI.indexOf(keepInc.priority)) keepInc.priority = gone.priority;
         keepInc.updated = Math.max(keepInc.updated, gone.updated);

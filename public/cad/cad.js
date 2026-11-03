@@ -100,8 +100,14 @@
 
   function rowHtml(inc) {
     const units = inc.units.filter((u) => u.status !== 'clear' || inc.closed);
+    // Named units first; unnamed radios (police radios rarely send aliases) only up to the space left
+    const isRadio = (u) => /^Radio \d+$/.test(u.name);
+    const ordered = [...units.filter((u) => !isRadio(u)), ...units.filter(isRadio).sort((a, b) => (a.status === 'dispatched') - (b.status === 'dispatched'))];
+    const shown = ordered.slice(0, 4);
+    const more = ordered.length - shown.length;
     const chips = units.length
-      ? units.map((u) => `<span class="chip ${statusClass(u.status)}" title="${esc(u.name)}: ${esc(u.status)}${u.agency ? ` (${esc(u.agency)})` : ''}">${esc(u.name)}</span>`).join('')
+      ? shown.map((u) => `<span class="chip ${statusClass(u.status)}" title="${esc(u.name)}: ${esc(u.status)}${u.agency ? ` (${esc(u.agency)})` : ''}">${esc(u.name)}</span>`).join('')
+        + (more > 0 ? `<span class="chip none" title="${esc(ordered.slice(4).map((u) => `${u.name}: ${u.status}`).join(', '))}">+${more} radio${more === 1 ? '' : 's'}</span>` : '')
       : '<span class="chip none">no units</span>';
     const ag = inc.agencies.map((a) => `<span class="badge ${esc(a.kind)}">${esc(a.name)}</span>`).join('');
     const end = inc.closed || now();
