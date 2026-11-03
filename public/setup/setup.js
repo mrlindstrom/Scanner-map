@@ -476,6 +476,18 @@
         }
         c.appendChild(toggleField('SUMMARY_ENRICH', 'Check each incident against nearby radio traffic',
           'After the summary posts, the AI re-reads the calls around each incident (same talkgroup, same street) and edits it with a corrected severity, status and units. Catches misheard words such as a “shooting” that was not one.', 'true'));
+
+        // --- CAD dashboard ----------------------------------------------
+        c.appendChild(el('h1', { style: 'font-size:18px;margin-top:22px' }, 'CAD dashboard'));
+        c.appendChild(infoBox(
+          'The <a href="/cad" target="_blank" rel="noopener">CAD board</a> shows active incidents with their units, statuses and agencies. ' +
+          'The AI follows the talkgroups checked below call by call (one short request per relevant call). Include your dispatch ' +
+          'channels and any automated dispatch voice; leave out school, airport and other talkgroups you do not want on the board. ' +
+          'With none checked, it uses the AI summary talkgroups.'));
+        c.appendChild(toggleField('CAD_ENABLED', 'Track incidents for the CAD board', 'Off = the board stops updating.', 'true'));
+        if (String(get('CAD_ENABLED') || 'true').toLowerCase() === 'true') {
+          talkgroupMultiSelect(c, 'CAD_TALK_GROUPS');
+        }
       },
     },
 

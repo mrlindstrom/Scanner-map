@@ -26,6 +26,7 @@ const SECTIONS = [
   ['filter', 'Transcript Filter'],
   ['merged', 'Merged Calls'],
   ['summary', 'Summaries & Ask AI'],
+  ['cad', 'CAD Dashboard'],
   ['talkgroups', 'Talkgroups'],
   ['tones', 'Tone Detection'],
   ['logging', 'Logging'],
@@ -190,6 +191,11 @@ add('summary', 'SUMMARY_MIN_SCORE', 'Minimum score', 'number', '2.5', '');
 add('summary', 'SUMMARY_AI_TIMEOUT_SEC', 'AI timeout (s)', 'number', '180', '');
 add('summary', 'SUMMARY_EXTRA_PRIORITY_TERMS', 'Extra priority phrases', 'pipe', '', 'e.g. signal 9|code 30');
 add('summary', 'SUMMARY_EXTRA_BENIGN_TERMS', 'Extra routine phrases', 'pipe', '', 'e.g. bike patrol');
+
+// ---- CAD dashboard (/cad)
+add('cad', 'CAD_ENABLED', 'Track incidents for the CAD board', 'bool', 'true', 'The AI follows dispatch traffic call by call and keeps the /cad board up to date.', { guided: 'AI Features' });
+add('cad', 'CAD_TALK_GROUPS', 'CAD talkgroups', 'list', '', 'IDs or system:id. Blank = the summary talkgroups.', { guided: 'AI Features' });
+add('cad', 'CAD_AGENCY_PREFIXES', 'Agency names for radio aliases', 'pipe', '', 'PREFIX=Agency, e.g. CCFD=Cypress Creek FD|SFD=Spring FD');
 
 // ---- Talkgroups
 add('talkgroups', 'ENABLE_MAPPED_TALK_GROUPS', 'Only map some talkgroups', 'bool', 'true', '', { guided: 'Talkgroups' });

@@ -145,6 +145,7 @@ let ADDRESS_PREFILTER_ENABLED = String(process.env.ADDRESS_PREFILTER ?? 'true').
 const summaryIncidents = require('./src/summary/incidents');
 const summaryEnrich = require('./src/summary/enrich');
 const radioAliases = require('./src/radio/aliases');
+const { createCadTracker } = require('./src/cad/tracker');
 const audioPreprocess = require('./src/transcription/audioPreprocess');
 const hallucinationFilter = require('./src/transcription/hallucinationFilter');
 const transcriptCorrections = require('./src/transcription/corrections');
@@ -892,7 +893,8 @@ function initializeDatabase() {
         if (tablesCreated === totalTables) {
           logger.info('Database tables initialized successfully.');
           radioAliases.init(db, { info: (m) => logger.info(m), warn: (m) => logger.warn(m) })
-            .catch((e) => logger.error(`Radio alias table setup failed: ${e.message}`));
+            .catch((e) => logger.error(`Radio alias table setup failed: ${e.message}`))
+            .then(() => cadTracker.start());
           resolve();
         }
       };
@@ -3669,6 +3671,15 @@ function validateAndAddFields(embed, fields) {
   return embed;
 }
 
+// CAD dashboard incident tracker (src/cad/tracker.js); the web server shows its cad_incidents table
+const cadTracker = createCadTracker({
+  db,
+  logger,
+  timeLabel: (ts) => summaryTimeLabel(ts),
+  // Normal priority: the board should keep up, but address extraction still comes first
+  ai: (prompt, numPredict) => summaryAiCompletion(prompt, numPredict, { label: 'CAD', priority: 'normal', timeoutMs: 90 * 1000 }),
+});
+
 // Function to update transcription
 function updateTranscription(id, transcriptionText, callback) {
   logger.info(`Calling updateTranscription for ID ${id}`);
@@ -3680,6 +3691,7 @@ function updateTranscription(id, transcriptionText, callback) {
         logger.error('Error updating transcription:', err);
       } else {
         logger.info(`Updated transcription for ID ${id}`);
+        if (String(transcriptionText || '').trim()) cadTracker.onCall(id); // CAD board (runs on its own queue)
       }
       if (callback) callback();
     }
@@ -5198,9 +5210,9 @@ function summaryTimeLabel(ts) {
 // One JSON completion from the configured provider. Ollama uses the same model
 // and num_ctx (OLLAMA_NUM_CTX) as Scanner Map's other requests, so the loaded model is reused
 // rather than reloaded.
-async function summaryAiCompletion(prompt, numPredict = 1500) {
-  // Lowest priority in the shared AI queue: live address extraction goes first.
-  const queueOpts = { label: 'Summary', timeoutMs: SUMMARY_AI_TIMEOUT_MS, priority: 'low' };
+async function summaryAiCompletion(prompt, numPredict = 1500, opts = {}) {
+  // Lowest priority in the shared AI queue by default: live address extraction goes first.
+  const queueOpts = { label: opts.label || 'Summary', timeoutMs: opts.timeoutMs || SUMMARY_AI_TIMEOUT_MS, priority: opts.priority || 'low' };
   try {
     if (AI_PROVIDER.toLowerCase() === 'openai') {
       if (!OPENAI_API_KEY) throw new Error('OpenAI API key is not configured.');
@@ -5237,7 +5249,7 @@ async function summaryAiCompletion(prompt, numPredict = 1500) {
     if (!response.ok) throw new Error(`Ollama API error ${response.status}`);
     return (await response.json()).response || '';
   } catch (error) {
-    if (error.name === 'AbortError') throw new Error(`AI request timed out after ${SUMMARY_AI_TIMEOUT_MS / 1000}s`);
+    if (error.name === 'AbortError') throw new Error(`AI request timed out after ${queueOpts.timeoutMs / 1000}s`);
     throw error;
   }
 }

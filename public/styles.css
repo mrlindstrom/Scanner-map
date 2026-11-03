@@ -79,6 +79,27 @@ body, html {
     opacity: 0.7;
 }
 
+/* Map -> CAD board switch (a link styled like the panel buttons) */
+#control-panel a.cad-switch {
+    display: inline-block;
+    margin-right: 10px;
+    padding: 8px 12px;
+    background-color: var(--background-color);
+    color: var(--text-color);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    font-size: 14px;
+    font-family: var(--font-family);
+    text-decoration: none;
+    white-space: nowrap;
+    transition: all 0.3s;
+}
+#control-panel a.cad-switch:hover {
+    background-color: var(--primary-color);
+    color: var(--background-color);
+    box-shadow: 0 0 10px var(--primary-color);
+}
+
 #control-panel button:hover, #control-panel select:hover, #control-panel input[type="text"]:hover {
     background-color: var(--primary-color);
     color: var(--background-color);

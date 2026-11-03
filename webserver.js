@@ -16,6 +16,7 @@ const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const http = require('http');
 const socketIo = require('socket.io');
+const { mountCad } = require('./src/cad/web');
 const crypto = require('crypto');
 const fetch = require('node-fetch');
 const llmQueue = require('./src/ai/llmQueue');
@@ -931,6 +932,9 @@ app.get('/api/health', (req, res) => {
 
 // Apply authentication middleware to protected routes if auth is enabled
 app.use(basicAuth);
+
+// CAD dashboard (/cad): incidents tracked by the bot, pushed live over socket.io
+mountCad(app, { getDb: () => db, io, publicDir: path.join(__dirname, 'public') });
 
 // Serve static files from the 'public' directory
 app.use(express.static(path.join(__dirname, 'public')));

@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scanner Map CAD</title>
+  <link rel="icon" href="/favicon.ico">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="/themes.css">
+  <script src="/config.js"></script>
+  <script src="/theme.js"></script>
+  <link rel="stylesheet" href="/cad/cad.css">
+</head>
+<body>
+  <header class="cad-header">
+    <div class="cad-brand">📟 <span>CAD</span></div>
+    <nav class="cad-tabs" role="tablist" aria-label="Board">
+      <button role="tab" data-board="fire">🚒 Fire/EMS <span class="count" data-count="fire">0</span></button>
+      <button role="tab" data-board="law">🚓 Law <span class="count" data-count="law">0</span></button>
+      <button role="tab" data-board="all">All <span class="count" data-count="all">0</span></button>
+    </nav>
+    <div class="cad-tools">
+      <label class="toggle" title="Show P4 service calls and single-call incidents with no address"><input type="checkbox" id="show-minor"> Minor</label>
+      <label class="toggle" title="Beep when a new priority 1 incident opens"><input type="checkbox" id="p1-sound"> 🔔 P1</label>
+      <select class="theme-select" data-theme-picker aria-label="Theme" title="Theme (shared with the map)"></select>
+      <span class="clock" id="clock">--:--:--</span>
+      <span class="conn" id="conn" title="Live updates">●</span>
+      <a class="map-link" href="/">🗺️ Map</a>
+    </div>
+  </header>
+
+  <section class="p1-band" id="p1-band" aria-label="Priority 1 incidents" hidden></section>
+
+  <div class="cad-stats" id="cad-stats"></div>
+
+  <main class="cad-main">
+    <section class="board" aria-label="Incidents">
+      <div class="board-head">
+        <span>Pri</span><span>Incident</span><span>Units</span><span>Status</span><span class="right">Elapsed</span>
+      </div>
+      <div id="incident-list" class="incident-list"></div>
+      <details class="closed-wrap" id="closed-wrap">
+        <summary>Recently closed <span id="closed-count">0</span></summary>
+        <div id="closed-list" class="incident-list closed"></div>
+      </details>
+      <p class="empty" id="empty" hidden>No active incidents.</p>
+    </section>
+
+    <aside class="side" id="side">
+      <div id="detail" class="detail" hidden></div>
+      <div id="unit-board" class="unit-board"></div>
+    </aside>
+  </main>
+
+  <footer class="cad-foot">
+    Built by AI from scanner radio traffic. Incidents, units and statuses are inferred from transcripts and can be wrong; always check the audio.
+  </footer>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.3.2/socket.io.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/cad/cad.js"></script>
+</body>
+</html>
